@@ -34,13 +34,7 @@ from numpy cimport int64_t
 import warnings
 cimport numpy as np
 
-from zipline.utils.calendars import get_calendar
-
-
-# IMPORTANT NOTE: You must change this template if you change
-# Asset.__reduce__, or else we'll attempt to unpickle an old version of this
-# class
-CACHE_FILE_TEMPLATE = '/tmp/.%s-%s.v7.cache'
+from trading_calendars import get_calendar
 
 
 cdef class Asset:
@@ -52,31 +46,41 @@ cdef class Asset:
         'end_date',
         'first_traded',
         'auto_close_date',
-        'exchange',
-        'exchange_full',
+        'tick_size',
+        'multiplier',
+        'exchange_info',
     })
 
     def __init__(self,
                  int64_t sid, # sid is required
-                 object exchange, # exchange is required
+                 object exchange_info, # exchange is required
                  object symbol="",
                  object asset_name="",
                  object start_date=None,
                  object end_date=None,
                  object first_traded=None,
                  object auto_close_date=None,
-                 object exchange_full=None):
+                 object tick_size=0.01,
+                 float multiplier=1.0):
 
         self.sid = sid
         self.symbol = symbol
         self.asset_name = asset_name
-        self.exchange = exchange
-        self.exchange_full = (exchange_full if exchange_full is not None
-                              else exchange)
+        self.exchange_info = exchange_info
         self.start_date = start_date
         self.end_date = end_date
         self.first_traded = first_traded
         self.auto_close_date = auto_close_date
+        self.tick_size = tick_size
+        self.price_multiplier = multiplier
+
+    @property
+    def exchange(self):
+        return self.exchange_info.canonical_name
+
+    @property
+    def exchange_full(self):
+        return self.exchange_info.name
 
     def __int__(self):
         return self.sid
@@ -137,14 +141,15 @@ cdef class Asset:
         be serialized/deserialized during pickling.
         """
         return (self.__class__, (self.sid,
-                                 self.exchange,
+                                 self.exchange_info,
                                  self.symbol,
                                  self.asset_name,
                                  self.start_date,
                                  self.end_date,
                                  self.first_traded,
                                  self.auto_close_date,
-                                 self.exchange_full))
+                                 self.tick_size,
+                                 self.price_multiplier))
 
     cpdef to_dict(self):
         """
@@ -160,6 +165,9 @@ cdef class Asset:
             'auto_close_date': self.auto_close_date,
             'exchange': self.exchange,
             'exchange_full': self.exchange_full,
+            'tick_size': self.tick_size,
+            'multiplier': self.price_multiplier,
+            'exchange_info': self.exchange_info,
         }
 
     @classmethod
@@ -167,7 +175,7 @@ cdef class Asset:
         """
         Build an Asset instance from a dict.
         """
-        return cls(**dict_)
+        return cls(**{k: v for k, v in dict_.items() if k in cls._kwargnames})
 
     def is_alive_for_session(self, session_label):
         """
@@ -253,15 +261,14 @@ cdef class Future(Asset):
         'expiration_date',
         'auto_close_date',
         'first_traded',
-        'exchange',
+        'exchange_info',
         'tick_size',
         'multiplier',
-        'exchange_full',
     })
 
     def __init__(self,
                  int64_t sid, # sid is required
-                 object exchange, # exchange is required
+                 object exchange_info, # exchange is required
                  object symbol="",
                  object root_symbol="",
                  object asset_name="",
@@ -271,26 +278,24 @@ cdef class Future(Asset):
                  object expiration_date=None,
                  object auto_close_date=None,
                  object first_traded=None,
-                 object tick_size="",
-                 float multiplier=1.0,
-                 object exchange_full=None):
+                 object tick_size=0.001,
+                 float multiplier=1.0):
 
         super().__init__(
             sid,
-            exchange,
+            exchange_info,
             symbol=symbol,
             asset_name=asset_name,
             start_date=start_date,
             end_date=end_date,
             first_traded=first_traded,
             auto_close_date=auto_close_date,
-            exchange_full=exchange_full,
+            tick_size=tick_size,
+            multiplier=multiplier
         )
         self.root_symbol = root_symbol
         self.notice_date = notice_date
         self.expiration_date = expiration_date
-        self.tick_size = tick_size
-        self.multiplier = multiplier
 
         if auto_close_date is None:
             if notice_date is None:
@@ -300,6 +305,17 @@ cdef class Future(Asset):
             else:
                 self.auto_close_date = min(notice_date, expiration_date)
 
+    property multiplier:
+        """
+        DEPRECATION: This property should be deprecated and is only present for
+        backwards compatibility
+        """
+        def __get__(self):
+            warnings.warn("The multiplier property will soon be "
+            "retired. Please use the price_multiplier property instead.",
+            DeprecationWarning)
+            return self.price_multiplier
+
     cpdef __reduce__(self):
         """
         Function used by pickle to determine how to serialize/deserialize this
@@ -308,7 +324,7 @@ cdef class Future(Asset):
         be serialized/deserialized during pickling.
         """
         return (self.__class__, (self.sid,
-                                 self.exchange,
+                                 self.exchange_info,
                                  self.symbol,
                                  self.root_symbol,
                                  self.asset_name,
@@ -319,8 +335,7 @@ cdef class Future(Asset):
                                  self.auto_close_date,
                                  self.first_traded,
                                  self.tick_size,
-                                 self.multiplier,
-                                 self.exchange_full))
+                                 self.price_multiplier))
 
     cpdef to_dict(self):
         """
@@ -330,8 +345,6 @@ cdef class Future(Asset):
         super_dict['root_symbol'] = self.root_symbol
         super_dict['notice_date'] = self.notice_date
         super_dict['expiration_date'] = self.expiration_date
-        super_dict['tick_size'] = self.tick_size
-        super_dict['multiplier'] = self.multiplier
         return super_dict
 
 

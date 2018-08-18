@@ -20,7 +20,7 @@ from scipy.stats import linregress, pearsonr, spearmanr
 
 from empyrical.stats import beta_aligned as empyrical_beta
 
-from zipline.assets import Equity
+from zipline.assets import Equity, ExchangeInfo
 from zipline.errors import IncompatibleTerms, NonExistentAssetInTimeFrame
 from zipline.pipeline import CustomFactor, Pipeline
 from zipline.pipeline.data import USEquityPricing
@@ -44,11 +44,7 @@ from zipline.testing import (
     make_cascading_boolean_array,
     parameter_space,
 )
-from zipline.testing.fixtures import (
-    WithSeededRandomPipelineEngine,
-    WithTradingEnvironment,
-    ZiplineTestCase,
-)
+import zipline.testing.fixtures as zf
 from zipline.testing.predicates import assert_equal
 from zipline.utils.numpy_utils import (
     as_column,
@@ -58,7 +54,9 @@ from zipline.utils.numpy_utils import (
 )
 
 
-class StatisticalBuiltInsTestCase(WithTradingEnvironment, ZiplineTestCase):
+class StatisticalBuiltInsTestCase(zf.WithAssetFinder,
+                                  zf.WithTradingCalendars,
+                                  zf.ZiplineTestCase):
     sids = ASSET_FINDER_EQUITY_SIDS = Int64Index([1, 2, 3])
     START_DATE = Timestamp('2015-01-31', tz='UTC')
     END_DATE = Timestamp('2015-03-01', tz='UTC')
@@ -351,7 +349,10 @@ class StatisticalBuiltInsTestCase(WithTradingEnvironment, ZiplineTestCase):
         `RollingLinearRegressionOfReturns` raise the proper exception when
         given a nonexistent target asset.
         """
-        my_asset = Equity(0, exchange="TEST")
+        my_asset = Equity(
+            0,
+            exchange_info=ExchangeInfo('TEST', 'TEST FULL', 'US'),
+        )
         start_date = self.pipeline_start_date
         end_date = self.pipeline_end_date
         run_pipeline = self.run_pipeline
@@ -400,7 +401,10 @@ class StatisticalBuiltInsTestCase(WithTradingEnvironment, ZiplineTestCase):
                 )
 
     def test_require_length_greater_than_one(self):
-        my_asset = Equity(0, exchange="TEST")
+        my_asset = Equity(
+            0,
+            exchange_info=ExchangeInfo('TEST', 'TEST FULL', 'US'),
+        )
 
         with self.assertRaises(ValueError):
             RollingPearsonOfReturns(
@@ -484,19 +488,19 @@ class StatisticalBuiltInsTestCase(WithTradingEnvironment, ZiplineTestCase):
         )
         self.assertEqual(result, expected)
 
-    def test_simple_beta_short_repr(self):
+    def test_simple_beta_graph_repr(self):
         beta = SimpleBeta(
             target=self.my_asset,
             regression_length=50,
             allowed_missing_percentage=0.5,
         )
-        result = beta.short_repr()
+        result = beta.graph_repr()
         expected = "SimpleBeta('A', 50, 25)".format(self.my_asset)
         self.assertEqual(result, expected)
 
 
-class StatisticalMethodsTestCase(WithSeededRandomPipelineEngine,
-                                 ZiplineTestCase):
+class StatisticalMethodsTestCase(zf.WithSeededRandomPipelineEngine,
+                                 zf.ZiplineTestCase):
     sids = ASSET_FINDER_EQUITY_SIDS = Int64Index([1, 2, 3])
     START_DATE = Timestamp('2015-01-31', tz='UTC')
     END_DATE = Timestamp('2015-03-01', tz='UTC')
@@ -912,7 +916,7 @@ class StatisticalMethodsTestCase(WithSeededRandomPipelineEngine,
             assert_frame_equal(output_result, expected_output_result)
 
 
-class VectorizedBetaTestCase(ZiplineTestCase):
+class VectorizedBetaTestCase(zf.ZiplineTestCase):
 
     def compare_with_empyrical(self, dependents, independent):
         INFINITY = 1000000  # close enough

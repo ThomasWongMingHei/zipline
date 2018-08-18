@@ -21,26 +21,19 @@ from numpy import nan
 import pandas as pd
 from six import iteritems
 
-from zipline import TradingAlgorithm
 from zipline._protocol import handle_non_market_minutes, BarData
 from zipline.assets import Asset, Equity
 from zipline.errors import (
     HistoryInInitialize,
     HistoryWindowStartsBeforeData,
 )
-from zipline.finance.trading import SimulationParameters
 from zipline.finance.asset_restrictions import NoRestrictions
 from zipline.testing import (
     create_minute_df_for_asset,
     str_to_seconds,
     MockDailyBarReader,
 )
-from zipline.testing.fixtures import (
-    WithCreateBarData,
-    WithDataPortal,
-    ZiplineTestCase,
-    alias,
-)
+import zipline.testing.fixtures as zf
 
 
 OHLC = ['open', 'high', 'low', 'close']
@@ -48,7 +41,7 @@ OHLCP = OHLC + ['price']
 ALL_FIELDS = OHLCP + ['volume']
 
 
-class WithHistory(WithCreateBarData, WithDataPortal):
+class WithHistory(zf.WithCreateBarData, zf.WithDataPortal):
     TRADING_START_DT = TRADING_ENV_MIN_DATE = START_DATE = pd.Timestamp(
         '2014-01-03',
         tz='UTC',
@@ -531,10 +524,12 @@ MINUTE_FIELD_INFO = {
 }
 
 
-class MinuteEquityHistoryTestCase(WithHistory, ZiplineTestCase):
+class MinuteEquityHistoryTestCase(WithHistory,
+                                  zf.WithMakeAlgo,
+                                  zf.ZiplineTestCase):
 
     EQUITY_DAILY_BAR_SOURCE_FROM_MINUTE = True
-    DATA_PORTAL_FIRST_TRADING_DAY = alias('TRADING_START_DT')
+    DATA_PORTAL_FIRST_TRADING_DAY = zf.alias('TRADING_START_DT')
 
     @classmethod
     def make_equity_minute_bar_data(cls):
@@ -619,28 +614,26 @@ class MinuteEquityHistoryTestCase(WithHistory, ZiplineTestCase):
                 pass
             """
         )
-
-        start = pd.Timestamp('2014-04-05', tz='UTC')
-        end = pd.Timestamp('2014-04-10', tz='UTC')
-
-        sim_params = SimulationParameters(
-            start_session=start,
-            end_session=end,
-            capital_base=float('1.0e5'),
-            data_frequency='minute',
-            emission_rate='daily',
-            trading_calendar=self.trading_calendar,
-        )
-
-        test_algo = TradingAlgorithm(
-            script=algo_text,
-            data_frequency='minute',
-            sim_params=sim_params,
-            env=self.env,
-        )
-
+        algo = self.make_algo(script=algo_text)
         with self.assertRaises(HistoryInInitialize):
-            test_algo.initialize()
+            algo.run()
+
+    def test_negative_bar_count(self):
+        """
+        Negative bar counts leak future information.
+        """
+        with self.assertRaisesRegexp(
+                ValueError,
+                "bar_count must be >= 1, but got -1"
+        ):
+            self.data_portal.get_history_window(
+                [self.ASSET1],
+                pd.Timestamp('2015-01-07 14:35', tz='UTC'),
+                -1,
+                '1d',
+                'close',
+                'minute',
+            )
 
     def test_daily_splits_and_mergers(self):
         # self.SPLIT_ASSET and self.MERGER_ASSET had splits/mergers
@@ -825,7 +818,7 @@ class MinuteEquityHistoryTestCase(WithHistory, ZiplineTestCase):
     def test_minute_regular(self, name, field, sid):
         # asset2 and asset3 both started on 1/5/2015, but asset3 trades every
         # 10 minutes
-        asset = self.env.asset_finder.retrieve_asset(sid)
+        asset = self.asset_finder.retrieve_asset(sid)
 
         # Check the first hour of equities trading.
         minutes = self.trading_calendars[Equity].minutes_for_session(
@@ -1674,7 +1667,7 @@ class NoPrefetchMinuteEquityHistoryTestCase(MinuteEquityHistoryTestCase):
     DATA_PORTAL_DAILY_HISTORY_PREFETCH = 0
 
 
-class DailyEquityHistoryTestCase(WithHistory, ZiplineTestCase):
+class DailyEquityHistoryTestCase(WithHistory, zf.ZiplineTestCase):
     CREATE_BARDATA_DATA_FREQUENCY = 'daily'
 
     @classmethod

@@ -1,8 +1,8 @@
 """
 NumericalExpression term.
 """
-from itertools import chain
 import re
+from itertools import chain
 from numbers import Number
 
 import numexpr
@@ -11,9 +11,8 @@ from numpy import (
     full,
     inf,
 )
-
 from zipline.pipeline.term import Term, ComputableTerm
-
+from zipline.utils.numpy_utils import bool_dtype
 
 _VARIABLE_NAME_RE = re.compile("^(x_)([0-9]+)$")
 
@@ -185,12 +184,19 @@ class NumericalExpression(ComputableTerm):
     window_length = 0
 
     def __new__(cls, expr, binds, dtype):
+        # We always allow filters to be used in windowed computations.
+        # Otherwise, an expression is window_safe if all its constituents are
+        # window_safe.
+        window_safe = (
+            (dtype == bool_dtype) or all(t.window_safe for t in binds)
+        )
+
         return super(NumericalExpression, cls).__new__(
             cls,
             inputs=binds,
             expr=expr,
             dtype=dtype,
-            window_safe=all(t.window_safe for t in binds),
+            window_safe=window_safe,
         )
 
     def _init(self, expr, *args, **kwargs):
@@ -318,9 +324,14 @@ class NumericalExpression(ComputableTerm):
             bindings=self.bindings,
         )
 
-    def short_repr(self):
+    def graph_repr(self):
         """Short repr to use when rendering Pipeline graphs."""
-        return "Expression: {expr}".format(
-            typename=type(self).__name__,
-            expr=self._expr,
+
+        # Replace any floating point numbers in the expression
+        # with their scientific notation
+        final = re.sub(r"[-+]?\d*\.\d+",
+                       lambda x: format(float(x.group(0)), '.2E'),
+                       self._expr)
+        return "Expression:\l  {}\l".format(
+            final,
         )

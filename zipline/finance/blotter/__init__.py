@@ -1,5 +1,5 @@
 #
-# Copyright 2016 Quantopian, Inc.
+# Copyright 2018 Quantopian, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,22 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .trading_calendar import TradingCalendar
-from .calendar_utils import (
-    clear_calendars,
-    deregister_calendar,
-    get_calendar,
-    register_calendar,
-    register_calendar_alias,
-    register_calendar_type,
-)
+from .simulation_blotter import SimulationBlotter
+from .blotter import Blotter
 
 __all__ = [
-    'clear_calendars',
-    'deregister_calendar',
-    'get_calendar',
-    'register_calendar',
-    'register_calendar_alias',
-    'register_calendar_type',
-    'TradingCalendar',
+    'SimulationBlotter',
+    'Blotter',
 ]

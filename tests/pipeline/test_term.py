@@ -8,13 +8,14 @@ from unittest import TestCase
 from toolz import assoc
 import pandas as pd
 
-from zipline.assets import Asset
+from zipline.assets import Asset, ExchangeInfo
 from zipline.errors import (
     DTypeNotSpecified,
     InvalidOutputName,
     NonWindowSafeInput,
     NotDType,
     TermInputsNotSpecified,
+    NonPipelineInputs,
     TermOutputsEmpty,
     UnsupportedDType,
     WindowLengthNotSpecified,
@@ -253,6 +254,16 @@ class DependencyResolutionTestCase(WithTradingSessions, ZiplineTestCase):
         with self.assertRaises(NonWindowSafeInput):
             SomeFactor(inputs=[SomeFactor(), SomeDataSet.foo])
 
+    def test_window_safety_one_window_length(self):
+        """
+        Test that window safety problems are only raised if
+        the parent factor has window length greater than 1
+        """
+        with self.assertRaises(NonWindowSafeInput):
+            SomeFactor(inputs=[SomeOtherFactor()])
+
+        SomeFactor(inputs=[SomeOtherFactor()], window_length=1)
+
 
 class ObjectIdentityTestCase(TestCase):
 
@@ -316,7 +327,10 @@ class ObjectIdentityTestCase(TestCase):
         self.assertIs(beta, multiple_outputs.beta)
 
     def test_instance_caching_of_slices(self):
-        my_asset = Asset(1, exchange="TEST")
+        my_asset = Asset(
+            1,
+            exchange_info=ExchangeInfo('TEST FULL', 'TEST', 'US'),
+        )
 
         f = GenericCustomFactor()
         f_slice = f[my_asset]
@@ -544,6 +558,9 @@ class ObjectIdentityTestCase(TestCase):
 
         with self.assertRaises(TermInputsNotSpecified):
             SomeFactorDefaultLength()
+
+        with self.assertRaises(NonPipelineInputs):
+            SomeFactor(window_length=1, inputs=[2])
 
         with self.assertRaises(WindowLengthNotSpecified):
             SomeFactor(inputs=(SomeDataSet.foo,))

@@ -112,10 +112,6 @@ ext_modules = [
         ['zipline/data/_minute_bar_internal.pyx']
     ),
     Extension(
-        'zipline.utils.calendars._calendar_helpers',
-        ['zipline/utils/calendars/_calendar_helpers.pyx']
-    ),
-    Extension(
         'zipline.data._resample',
         ['zipline/data/_resample.pyx']
     ),
@@ -171,8 +167,7 @@ def _filter_requirements(lines_iter, filter_names=None,
 
 REQ_UPPER_BOUNDS = {
     'bcolz': '<1',
-    'pandas': '<0.19',
-    'pandas-datareader': '<0.6',  # 0.6.0 requires pandas >=0.19.2
+    'pandas': '<=0.22',
     'networkx': '<2.0',
 }
 

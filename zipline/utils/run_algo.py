@@ -1,10 +1,8 @@
+import click
 import os
-import re
-from runpy import run_path
 import sys
 import warnings
 
-import click
 try:
     from pygments import highlight
     from pygments.lexers import PythonLexer
@@ -13,18 +11,21 @@ try:
 except ImportError:
     PYGMENTS = False
 import six
-from toolz import valfilter, concatv
+from toolz import concatv
+from trading_calendars import get_calendar
 
-from zipline.algorithm import TradingAlgorithm
 from zipline.data import bundles
+from zipline.data.loader import load_market_data
 from zipline.data.data_portal import DataPortal
 from zipline.finance import metrics
-from zipline.finance.trading import TradingEnvironment
+from zipline.finance.trading import SimulationParameters
 from zipline.pipeline.data import USEquityPricing
 from zipline.pipeline.loaders import USEquityPricingLoader
-from zipline.utils.calendars import get_calendar
-from zipline.utils.factory import create_simulation_parameters
+
 import zipline.utils.paths as pth
+from zipline.extensions import load
+from zipline.algorithm import TradingAlgorithm
+from zipline.finance.blotter import Blotter
 
 
 class _RunAlgoError(click.ClickException, ValueError):
@@ -61,7 +62,6 @@ def _run(handle_data,
          defines,
          data_frequency,
          capital_base,
-         data,
          bundle,
          bundle_timestamp,
          start,
@@ -71,11 +71,16 @@ def _run(handle_data,
          print_algo,
          metrics_set,
          local_namespace,
-         environ):
+         environ,
+         blotter,
+         benchmark_returns):
     """Run a backtest for the given algorithm.
 
     This is shared between the cli and :func:`zipline.run_algo`.
     """
+    if benchmark_returns is None:
+        benchmark_returns, _ = load_market_data(environ=environ)
+
     if algotext is not None:
         if local_namespace:
             ip = get_ipython()  # noqa
@@ -123,6 +128,7 @@ def _run(handle_data,
     if trading_calendar is None:
         trading_calendar = get_calendar('NYSE')
 
+    # date parameter validation
     if trading_calendar.session_distance(start, end) < 1:
         raise _RunAlgoError(
             'There are no trading days between %s and %s' % (
@@ -131,49 +137,35 @@ def _run(handle_data,
             ),
         )
 
-    if bundle is not None:
-        bundle_data = bundles.load(
-            bundle,
-            environ,
-            bundle_timestamp,
-        )
+    bundle_data = bundles.load(
+        bundle,
+        environ,
+        bundle_timestamp,
+    )
 
-        prefix, connstr = re.split(
-            r'sqlite:///',
-            str(bundle_data.asset_finder.engine.url),
-            maxsplit=1,
-        )
-        if prefix:
-            raise ValueError(
-                "invalid url %r, must begin with 'sqlite:///'" %
-                str(bundle_data.asset_finder.engine.url),
-            )
-        env = TradingEnvironment(asset_db_path=connstr, environ=environ)
-        first_trading_day =\
-            bundle_data.equity_minute_bar_reader.first_trading_day
-        data = DataPortal(
-            env.asset_finder,
-            trading_calendar=trading_calendar,
-            first_trading_day=first_trading_day,
-            equity_minute_reader=bundle_data.equity_minute_bar_reader,
-            equity_daily_reader=bundle_data.equity_daily_bar_reader,
-            adjustment_reader=bundle_data.adjustment_reader,
-        )
+    first_trading_day = \
+        bundle_data.equity_minute_bar_reader.first_trading_day
 
-        pipeline_loader = USEquityPricingLoader(
-            bundle_data.equity_daily_bar_reader,
-            bundle_data.adjustment_reader,
-        )
+    data = DataPortal(
+        bundle_data.asset_finder,
+        trading_calendar=trading_calendar,
+        first_trading_day=first_trading_day,
+        equity_minute_reader=bundle_data.equity_minute_bar_reader,
+        equity_daily_reader=bundle_data.equity_daily_bar_reader,
+        adjustment_reader=bundle_data.adjustment_reader,
+    )
 
-        def choose_loader(column):
-            if column in USEquityPricing.columns:
-                return pipeline_loader
-            raise ValueError(
-                "No PipelineLoader registered for column %s." % column
-            )
-    else:
-        env = TradingEnvironment(environ=environ)
-        choose_loader = None
+    pipeline_loader = USEquityPricingLoader(
+        bundle_data.equity_daily_bar_reader,
+        bundle_data.adjustment_reader,
+    )
+
+    def choose_loader(column):
+        if column in USEquityPricing.columns:
+            return pipeline_loader
+        raise ValueError(
+            "No PipelineLoader registered for column %s." % column
+        )
 
     if isinstance(metrics_set, six.string_types):
         try:
@@ -181,19 +173,27 @@ def _run(handle_data,
         except ValueError as e:
             raise _RunAlgoError(str(e))
 
+    if isinstance(blotter, six.string_types):
+        try:
+            blotter = load(Blotter, blotter)
+        except ValueError as e:
+            raise _RunAlgoError(str(e))
+
     perf = TradingAlgorithm(
         namespace=namespace,
-        env=env,
+        data_portal=data,
         get_pipeline_loader=choose_loader,
         trading_calendar=trading_calendar,
-        sim_params=create_simulation_parameters(
-            start=start,
-            end=end,
+        sim_params=SimulationParameters(
+            start_session=start,
+            end_session=end,
+            trading_calendar=trading_calendar,
             capital_base=capital_base,
             data_frequency=data_frequency,
-            trading_calendar=trading_calendar,
         ),
         metrics_set=metrics_set,
+        blotter=blotter,
+        benchmark_returns=benchmark_returns,
         **{
             'initialize': initialize,
             'handle_data': handle_data,
@@ -203,10 +203,7 @@ def _run(handle_data,
             'algo_filename': getattr(algofile, 'name', '<algorithm>'),
             'script': algotext,
         }
-    ).run(
-        data,
-        overwrite_sim_params=False,
-    )
+    ).run()
 
     if output == '-':
         click.echo(str(perf))
@@ -253,7 +250,9 @@ def load_extensions(default, extensions, strict, environ, reload=False):
         try:
             # load all of the zipline extensionss
             if ext.endswith('.py'):
-                run_path(ext, run_name='<extension>')
+                with open(ext) as f:
+                    ns = {}
+                    six.exec_(compile(f.read(), ext, 'exec'), ns, ns)
             else:
                 __import__(ext)
         except Exception as e:
@@ -277,16 +276,18 @@ def run_algorithm(start,
                   before_trading_start=None,
                   analyze=None,
                   data_frequency='daily',
-                  data=None,
-                  bundle=None,
+                  bundle='quantopian-quandl',
                   bundle_timestamp=None,
                   trading_calendar=None,
                   metrics_set='default',
+                  benchmark_returns=None,
                   default_extension=True,
                   extensions=(),
                   strict_extensions=True,
-                  environ=os.environ):
-    """Run a trading algorithm.
+                  environ=os.environ,
+                  blotter='default'):
+    """
+    Run a trading algorithm.
 
     Parameters
     ----------
@@ -313,19 +314,12 @@ def run_algorithm(start,
         performance data.
     data_frequency : {'daily', 'minute'}, optional
         The data frequency to run the algorithm at.
-    data : pd.DataFrame, pd.Panel, or DataPortal, optional
-        The ohlcv data to run the backtest with.
-        This argument is mutually exclusive with:
-        ``bundle``
-        ``bundle_timestamp``
     bundle : str, optional
         The name of the data bundle to use to load the data to run the backtest
         with. This defaults to 'quantopian-quandl'.
-        This argument is mutually exclusive with ``data``.
     bundle_timestamp : datetime, optional
         The datetime to lookup the bundle data for. This defaults to the
         current time.
-        This argument is mutually exclusive with ``data``.
     trading_calendar : TradingCalendar, optional
         The trading calendar to use for your backtest.
     metrics_set : iterable[Metric] or str, optional
@@ -344,6 +338,12 @@ def run_algorithm(start,
     environ : mapping[str -> str], optional
         The os environment to use. Many extensions use this to get parameters.
         This defaults to ``os.environ``.
+    blotter : str or zipline.finance.blotter.Blotter, optional
+        Blotter to use with this algorithm. If passed as a string, we look for
+        a blotter construction function registered with
+        ``zipline.extensions.register`` and call it with no parameters.
+        Default is a :class:`zipline.finance.blotter.SimulationBlotter` that
+        never cancels orders.
 
     Returns
     -------
@@ -356,25 +356,6 @@ def run_algorithm(start,
     """
     load_extensions(default_extension, extensions, strict_extensions, environ)
 
-    non_none_data = valfilter(bool, {
-        'data': data is not None,
-        'bundle': bundle is not None,
-    })
-    if not non_none_data:
-        # if neither data nor bundle are passed use 'quantopian-quandl'
-        bundle = 'quantopian-quandl'
-
-    elif len(non_none_data) != 1:
-        raise ValueError(
-            'must specify one of `data`, `data_portal`, or `bundle`,'
-            ' got: %r' % non_none_data,
-        )
-
-    elif 'bundle' not in non_none_data and bundle_timestamp is not None:
-        raise ValueError(
-            'cannot specify `bundle_timestamp` without passing `bundle`',
-        )
-
     return _run(
         handle_data=handle_data,
         initialize=initialize,
@@ -385,7 +366,6 @@ def run_algorithm(start,
         defines=(),
         data_frequency=data_frequency,
         capital_base=capital_base,
-        data=data,
         bundle=bundle,
         bundle_timestamp=bundle_timestamp,
         start=start,
@@ -396,4 +376,6 @@ def run_algorithm(start,
         metrics_set=metrics_set,
         local_namespace=False,
         environ=environ,
+        blotter=blotter,
+        benchmark_returns=benchmark_returns,
     )

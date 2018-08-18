@@ -1,10 +1,8 @@
-from datetime import timedelta
 from textwrap import dedent
 
 from nose_parameterized import parameterized
 from pandas import DataFrame
 
-from zipline import TradingAlgorithm
 from zipline.assets import Equity, Future
 from zipline.errors import IncompatibleCommissionModel
 from zipline.finance.commission import (
@@ -19,13 +17,8 @@ from zipline.finance.commission import (
 )
 from zipline.finance.order import Order
 from zipline.finance.transaction import Transaction
-from zipline.testing import ZiplineTestCase, trades_by_sid_to_dfs
-from zipline.testing.fixtures import (
-    WithAssetFinder,
-    WithSimParams,
-    WithDataPortal
-)
-from zipline.utils import factory
+from zipline.testing import ZiplineTestCase
+from zipline.testing.fixtures import WithAssetFinder, WithMakeAlgo
 
 
 class CommissionUnitTests(WithAssetFinder, ZiplineTestCase):
@@ -299,9 +292,12 @@ class CommissionUnitTests(WithAssetFinder, ZiplineTestCase):
         self.assertAlmostEqual(15.3, model.calculate(order, txns[2]))
 
 
-class CommissionAlgorithmTests(WithDataPortal, WithSimParams, ZiplineTestCase):
+class CommissionAlgorithmTests(WithMakeAlgo, ZiplineTestCase):
     # make sure order commissions are properly incremented
+    SIM_PARAMS_DATA_FREQUENCY = 'daily'
 
+    # NOTE: This is required to use futures data with WithDataPortal right now.
+    DATA_PORTAL_USE_MINUTE_DATA = True
     sidint, = ASSET_FINDER_EQUITY_SIDS = (133,)
 
     code = dedent(
@@ -346,30 +342,23 @@ class CommissionAlgorithmTests(WithDataPortal, WithSimParams, ZiplineTestCase):
 
     @classmethod
     def make_equity_daily_bar_data(cls):
-        num_days = len(cls.sim_params.sessions)
-
-        return trades_by_sid_to_dfs(
-            {
-                cls.sidint: factory.create_trade_history(
-                    cls.sidint,
-                    [10.0] * num_days,
-                    [100.0] * num_days,
-                    timedelta(days=1),
-                    cls.sim_params,
-                    trading_calendar=cls.trading_calendar,
-                ),
-            },
-            index=cls.sim_params.sessions,
+        sessions = cls.trading_calendar.sessions_in_range(
+            cls.START_DATE, cls.END_DATE,
         )
+        for sid in cls.ASSET_FINDER_EQUITY_SIDS:
+            yield sid, DataFrame(
+                index=sessions,
+                data={
+                    'open': 10.0,
+                    'high': 10.0,
+                    'low': 10.0,
+                    'close': 10.0,
+                    'volume': 100.0
+                }
+            )
 
     def get_results(self, algo_code):
-        algo = TradingAlgorithm(
-            script=algo_code,
-            env=self.env,
-            sim_params=self.sim_params
-        )
-
-        return algo.run(self.data_portal)
+        return self.run_algorithm(script=algo_code)
 
     def test_per_trade(self):
         results = self.get_results(

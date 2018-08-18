@@ -11,6 +11,7 @@ cimport numpy as np
 import numpy as np
 import pandas as pd
 from toolz import sliding_window
+from trading_calendars.utils.pandas_utils import days_at_time
 
 from zipline.lib.adjusted_array import AdjustedArray
 from zipline.lib.adjustment cimport (
@@ -25,7 +26,6 @@ from zipline.pipeline.common import (
     SID_FIELD_NAME,
     TS_FIELD_NAME
 )
-from zipline.utils.pandas_utils import days_at_time
 
 
 cdef bint isnan(np.float64_t value):
@@ -582,6 +582,11 @@ cdef arrays_from_rows(DatetimeIndex_t dates,
     cdef Py_ssize_t size = len(ts_ixs)
 
     for column in columns:
+        values = all_rows[getname(column)].values
+        if isinstance(values, pd.Categorical):
+            # convert pandas categoricals into ndarray[object]
+            values = values.get_values()
+
         out[column] = array_for_column[AsArrayKind](
             column.dtype,
             out_shape,
@@ -598,7 +603,7 @@ cdef arrays_from_rows(DatetimeIndex_t dates,
             asof_ixs,
             sids,
             column_ixs,
-            all_rows[getname(column)].values.astype(column.dtype),
+            values.astype(column.dtype, copy=False),
             column.missing_value,
             array_kind,
         )
@@ -618,7 +623,7 @@ cdef arrays_from_rows_with_assets(DatetimeIndex_t dates,
         data_query_time,
         data_query_tz,
         assets,
-        all_rows[SID_FIELD_NAME].values.astype('int64'),
+        all_rows[SID_FIELD_NAME].values.astype('int64', copy=False),
         columns,
         all_rows,
         array_kind,

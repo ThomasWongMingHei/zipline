@@ -27,10 +27,9 @@ from pandas import (
     Series,
     Timestamp,
 )
-from pandas.tseries.tools import normalize_date
 from six import iteritems, itervalues
+from trading_calendars import get_calendar
 
-from zipline.algorithm import TradingAlgorithm
 from zipline.api import (
     attach_pipeline,
     pipeline_output,
@@ -42,8 +41,9 @@ from zipline.errors import (
     NoSuchPipeline,
     DuplicatePipelineName,
 )
+from zipline.finance.trading import SimulationParameters
 from zipline.lib.adjustment import MULTIPLY
-from zipline.pipeline import Pipeline
+from zipline.pipeline import Pipeline, CustomFactor
 from zipline.pipeline.factors import VWAP
 from zipline.pipeline.data import USEquityPricing
 from zipline.pipeline.loaders.frame import DataFrameLoader
@@ -53,17 +53,14 @@ from zipline.pipeline.loaders.equity_pricing_loader import (
 from zipline.testing import (
     str_to_seconds
 )
-from zipline.testing import (
-    create_empty_splits_mergers_frame,
-    FakeDataPortal,
-)
+from zipline.testing import create_empty_splits_mergers_frame
 from zipline.testing.fixtures import (
+    WithMakeAlgo,
     WithAdjustmentReader,
     WithBcolzEquityDailyBarReaderFromCSVs,
-    WithDataPortal,
     ZiplineTestCase,
 )
-from zipline.utils.calendars import get_calendar
+from zipline.utils.pandas_utils import normalize_date
 
 TEST_RESOURCE_PATH = join(
     dirname(dirname(realpath(__file__))),  # zipline_repo/tests
@@ -85,12 +82,19 @@ def rolling_vwap(df, length):
     return Series(out, index=df.index)
 
 
-class ClosesAndVolumes(WithDataPortal, ZiplineTestCase):
+class ClosesAndVolumes(WithMakeAlgo, ZiplineTestCase):
     sids = 1, 2, 3
     START_DATE = pd.Timestamp('2014-01-01', tz='utc')
     END_DATE = pd.Timestamp('2014-02-01', tz='utc')
     dates = date_range(START_DATE, END_DATE, freq=get_calendar("NYSE").day,
                        tz='utc')
+
+    SIM_PARAMS_DATA_FREQUENCY = 'daily'
+    DATA_PORTAL_USE_MINUTE_DATA = False
+
+    # FIXME: This currently uses benchmark returns from the trading
+    # environment.
+    BENCHMARK_SID = None
 
     @classmethod
     def make_equity_info(cls):
@@ -163,6 +167,24 @@ class ClosesAndVolumes(WithDataPortal, ZiplineTestCase):
             }
         ])
 
+        cls.default_sim_params = SimulationParameters(
+            start_session=cls.first_asset_start,
+            end_session=cls.last_asset_end,
+            trading_calendar=cls.trading_calendar,
+            emission_rate='daily',
+            data_frequency='daily',
+        )
+
+    def make_algo_kwargs(self, **overrides):
+        return self.merge_with_inherited_algo_kwargs(
+            ClosesAndVolumes,
+            suite_overrides=dict(
+                sim_params=self.default_sim_params,
+                get_pipeline_loader=lambda column: self.pipeline_close_loader,
+            ),
+            method_overrides=overrides,
+        )
+
     def init_instance_fixtures(self):
         super(ClosesAndVolumes, self).init_instance_fixtures()
 
@@ -212,35 +234,25 @@ class ClosesAndVolumes(WithDataPortal, ZiplineTestCase):
             attach_pipeline(Pipeline(), 'test')
             raise AssertionError("Shouldn't make it past attach_pipeline!")
 
-        algo = TradingAlgorithm(
+        algo = self.make_algo(
             initialize=initialize,
             handle_data=late_attach,
-            data_frequency='daily',
-            get_pipeline_loader=lambda column: self.pipeline_close_loader,
-            start=self.first_asset_start - self.trading_day,
-            end=self.last_asset_end + self.trading_day,
-            env=self.env,
         )
 
         with self.assertRaises(AttachPipelineAfterInitialize):
-            algo.run(self.data_portal)
+            algo.run()
 
         def barf(context, data):
             raise AssertionError("Shouldn't make it past before_trading_start")
 
-        algo = TradingAlgorithm(
+        algo = self.make_algo(
             initialize=initialize,
             before_trading_start=late_attach,
             handle_data=barf,
-            data_frequency='daily',
-            get_pipeline_loader=lambda column: self.pipeline_close_loader,
-            start=self.first_asset_start - self.trading_day,
-            end=self.last_asset_end + self.trading_day,
-            env=self.env,
         )
 
         with self.assertRaises(AttachPipelineAfterInitialize):
-            algo.run(self.data_portal)
+            algo.run()
 
     def test_pipeline_output_after_initialize(self):
         """
@@ -257,19 +269,14 @@ class ClosesAndVolumes(WithDataPortal, ZiplineTestCase):
         def before_trading_start(context, data):
             raise AssertionError("Shouldn't make it past initialize!")
 
-        algo = TradingAlgorithm(
+        algo = self.make_algo(
             initialize=initialize,
             handle_data=handle_data,
             before_trading_start=before_trading_start,
-            data_frequency='daily',
-            get_pipeline_loader=lambda column: self.pipeline_close_loader,
-            start=self.first_asset_start - self.trading_day,
-            end=self.last_asset_end + self.trading_day,
-            env=self.env,
         )
 
         with self.assertRaises(PipelineOutputDuringInitialize):
-            algo.run(self.data_portal)
+            algo.run()
 
     def test_get_output_nonexistent_pipeline(self):
         """
@@ -285,19 +292,14 @@ class ClosesAndVolumes(WithDataPortal, ZiplineTestCase):
             pipeline_output('not_test')
             raise AssertionError("Shouldn't make it past pipeline_output!")
 
-        algo = TradingAlgorithm(
+        algo = self.make_algo(
             initialize=initialize,
             handle_data=handle_data,
             before_trading_start=before_trading_start,
-            data_frequency='daily',
-            get_pipeline_loader=lambda column: self.pipeline_close_loader,
-            start=self.first_asset_start - self.trading_day,
-            end=self.last_asset_end + self.trading_day,
-            env=self.env,
         )
 
         with self.assertRaises(NoSuchPipeline):
-            algo.run(self.data_portal)
+            algo.run()
 
     @parameterized.expand([('default', None),
                            ('day', 1),
@@ -347,19 +349,14 @@ class ClosesAndVolumes(WithDataPortal, ZiplineTestCase):
 
         before_trading_start = handle_data
 
-        algo = TradingAlgorithm(
+        algo = self.make_algo(
             initialize=initialize,
             handle_data=handle_data,
             before_trading_start=before_trading_start,
-            data_frequency='daily',
-            get_pipeline_loader=lambda column: self.pipeline_close_loader,
-            start=self.first_asset_start,
-            end=self.last_asset_end,
-            env=self.env,
         )
 
         # Run for a week in the middle of our data.
-        algo.run(self.data_portal)
+        algo.run()
 
     def test_multiple_pipelines(self):
         """
@@ -399,17 +396,13 @@ class ClosesAndVolumes(WithDataPortal, ZiplineTestCase):
             USEquityPricing.volume: self.pipeline_volume_loader,
         }
 
-        algo = TradingAlgorithm(
+        algo = self.make_algo(
             initialize=initialize,
             handle_data=handle_data,
-            data_frequency='daily',
             get_pipeline_loader=lambda column: column_to_loader[column],
-            start=self.first_asset_start,
-            end=self.last_asset_end,
-            env=self.env,
         )
 
-        algo.run(self.data_portal)
+        algo.run()
 
     def test_duplicate_pipeline_names(self):
         """
@@ -420,17 +413,9 @@ class ClosesAndVolumes(WithDataPortal, ZiplineTestCase):
             attach_pipeline(Pipeline(), 'test')
             attach_pipeline(Pipeline(), 'test')
 
-        algo = TradingAlgorithm(
-            initialize=initialize,
-            data_frequency='daily',
-            get_pipeline_loader=lambda column: self.pipeline_close_loader,
-            start=self.first_asset_start,
-            end=self.last_asset_end,
-            env=self.env,
-        )
-
+        algo = self.make_algo(initialize=initialize)
         with self.assertRaises(DuplicatePipelineName):
-            algo.run(self.data_portal)
+            algo.run()
 
 
 class MockDailyBarSpotReader(object):
@@ -441,7 +426,8 @@ class MockDailyBarSpotReader(object):
         return 100.0
 
 
-class PipelineAlgorithmTestCase(WithBcolzEquityDailyBarReaderFromCSVs,
+class PipelineAlgorithmTestCase(WithMakeAlgo,
+                                WithBcolzEquityDailyBarReaderFromCSVs,
                                 WithAdjustmentReader,
                                 ZiplineTestCase):
     AAPL = 1
@@ -449,8 +435,15 @@ class PipelineAlgorithmTestCase(WithBcolzEquityDailyBarReaderFromCSVs,
     BRK_A = 3
     ASSET_FINDER_EQUITY_SIDS = AAPL, MSFT, BRK_A
     ASSET_FINDER_EQUITY_SYMBOLS = 'AAPL', 'MSFT', 'BRK_A'
-    START_DATE = Timestamp('2014')
-    END_DATE = Timestamp('2015')
+    START_DATE = Timestamp('2014', tz='UTC')
+    END_DATE = Timestamp('2015', tz='UTC')
+
+    SIM_PARAMS_DATA_FREQUENCY = 'daily'
+    DATA_PORTAL_USE_MINUTE_DATA = False
+
+    # FIXME: This currently uses benchmark returns from the trading
+    # environment.
+    BENCHMARK_SID = None
 
     @classmethod
     def make_equity_daily_bar_data(cls):
@@ -506,6 +499,15 @@ class PipelineAlgorithmTestCase(WithBcolzEquityDailyBarReaderFromCSVs,
         cls.AAPL_split_date = Timestamp("2014-06-09", tz='UTC')
         cls.assets = cls.asset_finder.retrieve_all(
             cls.ASSET_FINDER_EQUITY_SIDS
+        )
+
+    def make_algo_kwargs(self, **overrides):
+        return self.merge_with_inherited_algo_kwargs(
+            PipelineAlgorithmTestCase,
+            suite_overrides=dict(
+                get_pipeline_loader=lambda column: self.pipeline_loader,
+            ),
+            method_overrides=overrides,
         )
 
     def compute_expected_vwaps(self, window_lengths):
@@ -642,22 +644,17 @@ class PipelineAlgorithmTestCase(WithBcolzEquityDailyBarReaderFromCSVs,
         # Do the same checks in before_trading_start
         before_trading_start = handle_data
 
-        algo = TradingAlgorithm(
+        self.run_algorithm(
             initialize=initialize,
             handle_data=handle_data,
             before_trading_start=before_trading_start,
-            data_frequency='daily',
-            get_pipeline_loader=lambda column: self.pipeline_loader,
-            start=self.dates[max(window_lengths)],
-            end=self.dates[-1],
-            env=self.env,
-        )
-
-        algo.run(
-            FakeDataPortal(self.env),
-            # Yes, I really do want to use the start and end dates I passed to
-            # TradingAlgorithm.
-            overwrite_sim_params=False,
+            sim_params=SimulationParameters(
+                start_session=self.dates[max(window_lengths)],
+                end_session=self.dates[-1],
+                data_frequency='daily',
+                emission_rate='daily',
+                trading_calendar=self.trading_calendar,
+            )
         )
 
     def test_empty_pipeline(self):
@@ -682,20 +679,17 @@ class PipelineAlgorithmTestCase(WithBcolzEquityDailyBarReaderFromCSVs,
             self.assertTrue(context.results.empty)
             count[0] += 1
 
-        algo = TradingAlgorithm(
+        self.run_algorithm(
             initialize=initialize,
             handle_data=handle_data,
             before_trading_start=before_trading_start,
-            data_frequency='daily',
-            get_pipeline_loader=lambda column: self.pipeline_loader,
-            start=self.dates[0],
-            end=self.dates[-1],
-            env=self.env,
-        )
-
-        algo.run(
-            FakeDataPortal(self.env),
-            overwrite_sim_params=False,
+            sim_params=SimulationParameters(
+                start_session=self.dates[0],
+                end_session=self.dates[-1],
+                data_frequency='daily',
+                emission_rate='daily',
+                trading_calendar=self.trading_calendar,
+            )
         )
 
         self.assertTrue(count[0] > 0)
@@ -730,20 +724,62 @@ class PipelineAlgorithmTestCase(WithBcolzEquityDailyBarReaderFromCSVs,
             self.assertTrue(context.results.empty)
             count[0] += 1
 
-        algo = TradingAlgorithm(
+        self.run_algorithm(
             initialize=initialize,
             handle_data=handle_data,
             before_trading_start=before_trading_start,
-            data_frequency='daily',
-            get_pipeline_loader=lambda column: self.pipeline_loader,
-            start=self.dates[0],
-            end=current_day,
-            env=self.env,
-        )
-
-        algo.run(
-            FakeDataPortal(self.env),
-            overwrite_sim_params=False,
+            sim_params=SimulationParameters(
+                start_session=self.dates[0],
+                end_session=current_day,
+                data_frequency='daily',
+                emission_rate='daily',
+                trading_calendar=self.trading_calendar,
+            )
         )
 
         self.assertTrue(count[0] > 0)
+
+
+class PipelineSequenceTestCase(WithMakeAlgo, ZiplineTestCase):
+
+    # run algorithm for 3 days
+    START_DATE = pd.Timestamp('2014-12-29', tz='utc')
+    END_DATE = pd.Timestamp('2014-12-31', tz='utc')
+
+    def get_pipeline_loader(self):
+        raise AssertionError("Loading terms for pipeline with no inputs")
+
+    def test_pipeline_compute_before_bts(self):
+
+        # for storing and keeping track of calls to BTS and TestFactor.compute
+        trace = []
+
+        class TestFactor(CustomFactor):
+            inputs = ()
+
+            # window_length doesn't actually matter for this test case
+            window_length = 1
+
+            def compute(self, today, assets, out):
+                trace.append("CustomFactor call")
+
+        def initialize(context):
+            pipeline = attach_pipeline(Pipeline(), 'my_pipeline')
+            test_factor = TestFactor()
+            pipeline.add(test_factor, 'test_factor')
+
+        def before_trading_start(context, data):
+            trace.append("BTS call")
+            pipeline_output('my_pipeline')
+
+        self.run_algorithm(
+            initialize=initialize,
+            before_trading_start=before_trading_start,
+            get_pipeline_loader=self.get_pipeline_loader,
+        )
+
+        # All pipeline computation calls should occur before any BTS calls,
+        # and the algorithm is being run for 3 days, so the first 3 calls
+        # should be to the custom factor and the next 3 calls should be to BTS
+        expected_result = ["CustomFactor call"] * 3 + ["BTS call"] * 3
+        self.assertEqual(trace, expected_result)
