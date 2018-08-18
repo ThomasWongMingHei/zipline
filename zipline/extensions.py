@@ -1,7 +1,7 @@
 import re
 import six
 from toolz import curry
-
+import pandas as pd
 
 def create_args(args, root):
     """
@@ -268,3 +268,10 @@ extensible = create_registry
 
 # A global dictionary for storing instances of Registry:
 custom_types = {}
+
+
+from zipline.data.bundles import register
+from zipline.data.bundles.csvdir import csvdir_equities
+start_session = pd.Timestamp('2012-1-1', tz='utc')
+end_session = pd.Timestamp('2013-1-1', tz='utc')
+register('custom-csvdir-bundle',csvdir_equities(["daily"],'D:\Quantopian'),calendar_name='NYSE',start_session=start_session,end_session=end_session)
