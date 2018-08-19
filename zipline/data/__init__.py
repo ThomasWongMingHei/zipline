@@ -2,7 +2,7 @@
 from . import quandl  # noqa
 from . import csvdir  # noqa
 from . import mongodir # noqa
-from . import arcticdir # noqa
+
 
 from .core import (
     UnknownBundle,
