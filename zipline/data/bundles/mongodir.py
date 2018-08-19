@@ -13,7 +13,6 @@ from six.moves.urllib.parse import urlencode
 from six import iteritems
 from trading_calendars import register_calendar_alias
 
-from zipline.utils.deprecate import deprecated
 from . import core as bundles
 import numpy as np
 import pymongo
@@ -64,6 +63,7 @@ def parse_pricing_and_vol(metadataf,sessions):
     for row in metadataf.itertuples():
         asset_id = row[0]
         _asset_data=QT_mongo2df(row[-3],row[-2],row[-1])
+        _asset_data.set_index('date',inplace=True)                     
         asset_data = _asset_data.reindex(sessions.tz_localize(None),method='pad').fillna(0.0)
         yield asset_id, asset_data
 
@@ -92,13 +92,13 @@ def quandl_bundle(environ,
 
     asset_db_writer.write(equities=asset_metadata)
 
-    symbol_map = asset_metadata.symbol
+    symbol_map = asset_metadata['symbol']
+
     sessions = calendar.sessions_in_range(start_session, end_session)
-    metadataframe=pd.read_csv(metadataurl)
+    metadataframe=pd.read_csv(Metadataurl)
     metadataframe.set_index('sid',inplace=True)
 
     # download daily_bar_data_from
-    raw_data.set_index(['date', 'symbol'], inplace=True)
     daily_bar_writer.write(parse_pricing_and_vol(metadataframe,sessions),show_progress=show_progress)
 
     
