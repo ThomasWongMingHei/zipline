@@ -102,4 +102,5 @@ def quandl_bundle(environ,
     # download daily_bar_data_from
     daily_bar_writer.write(parse_pricing_and_vol(metadataframe,sessions),show_progress=show_progress)
 
+    adjustment_writer.write()
     
