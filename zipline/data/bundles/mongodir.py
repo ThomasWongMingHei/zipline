@@ -63,6 +63,7 @@ def parse_pricing_and_vol(metadataf,sessions):
     for row in metadataf.itertuples():
         asset_id = row[0]
         _asset_data=QT_mongo2df(row[-3],row[-2],row[-1])
+        _asset_data.loc[:, 'date'] = pd.to_datetime(_asset_data['date'])
         _asset_data.set_index('date',inplace=True)                     
         asset_data = _asset_data.reindex(sessions.tz_localize(None),method='pad').fillna(0.0)
         yield asset_id, asset_data
