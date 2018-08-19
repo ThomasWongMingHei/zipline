@@ -1,12 +1,32 @@
-from . import loader
-from .loader import (
-    load_prices_from_csv,
-    load_prices_from_csv_folder,
+# These imports are necessary to force module-scope register calls to happen.
+from . import quandl  # noqa
+from . import csvdir  # noqa
+from . import mongodir # noqa
+from . import arcticdir # noqa
+
+from .core import (
+    UnknownBundle,
+    bundles,
+    clean,
+    from_bundle_ingest_dirname,
+    ingest,
+    ingestions_for_bundle,
+    load,
+    register,
+    to_bundle_ingest_dirname,
+    unregister,
 )
 
 
 __all__ = [
-    'load_prices_from_csv',
-    'load_prices_from_csv_folder',
-    'loader',
+    'UnknownBundle',
+    'bundles',
+    'clean',
+    'from_bundle_ingest_dirname',
+    'ingest',
+    'ingestions_for_bundle',
+    'load',
+    'register',
+    'to_bundle_ingest_dirname',
+    'unregister',
 ]
