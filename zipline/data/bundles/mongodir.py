@@ -68,7 +68,7 @@ def parse_pricing_and_vol(metadataf,sessions):
         yield asset_id, asset_data
 
 
-@bundles.register('quandl')
+@bundles.register('mongodir')
 def quandl_bundle(environ,
                   asset_db_writer,
                   minute_bar_writer,
