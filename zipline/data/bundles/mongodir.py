@@ -54,7 +54,7 @@ def gen_asset_metadata(metadataurl, show_progress):
 
     metadataframe=pd.read_csv(metadataurl)
     metadataframe.set_index('sid',inplace=True)
-    metadataframe.drop(columns=['dburl', 'dbname','dbcollection'],inplace=True)
+    metadataframe.drop(['dburl', 'dbname','dbcollection'],inplace=True)
     return metadataframe
 
 
