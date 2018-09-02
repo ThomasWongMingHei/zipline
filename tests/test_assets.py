@@ -43,6 +43,7 @@ from zipline.assets import (
     AssetDBWriter,
     AssetFinder,
 )
+from zipline.assets.assets import OwnershipPeriod
 from zipline.assets.synthetic import (
     make_commodity_future_info,
     make_rotating_equity_info,
@@ -741,8 +742,7 @@ class AssetFinderTestCase(WithTradingCalendars, ZiplineTestCase):
         with self.assertRaises(ValueError) as e:
             self.write_assets(equities=df)
 
-        self.assertEqual(
-            str(e.exception),
+        expected_error_msg = (
             "Ambiguous ownership for 1 symbol, multiple assets held the"
             " following symbols:\n"
             "MULTIPLE (??):\n"
@@ -754,6 +754,7 @@ class AssetFinderTestCase(WithTradingCalendars, ZiplineTestCase):
             "  2   2010-01-01 2013-01-01\n"
             "  3   2011-01-01 2012-01-01"
         )
+        self.assertEqual(str(e.exception), expected_error_msg)
 
     def test_lookup_generic(self):
         """
@@ -2286,3 +2287,98 @@ class TestExchangeInfo(ZiplineTestCase):
                 exchange_names[asset.sid]
             ]
             assert_equal(asset.exchange_info, expected_exchange_info)
+
+
+class TestWriteDirect(WithTmpDir, ZiplineTestCase):
+    def test_write_direct(self):
+        path = os.path.join(self.tmpdir.path, 'assets.db')
+        writer = AssetDBWriter(path)
+
+        # don't include anything with a default to test that those work.
+        equities = pd.DataFrame({
+            'sid': [0, 1],
+            'asset_name': ['Ayy Inc.', 'Lmao LP'],
+            # the full exchange name
+            'exchange': ['NYSE', 'TSE'],
+        })
+        equity_symbol_mappings = pd.DataFrame({
+            'sid': [0, 1],
+            'symbol': ['AYY', 'LMAO'],
+            'company_symbol':  ['AYY', 'LMAO'],
+            'share_class_symbol': ['', ''],
+        })
+        equity_supplementary_mappings = pd.DataFrame({
+            'sid': [0, 1],
+            'field': ['QSIP', 'QSIP'],
+            'value': [str(hash(s)) for s in ['AYY', 'LMAO']],
+        })
+        exchanges = pd.DataFrame({
+            'exchange': ['NYSE', 'TSE'],
+            'country_code': ['US', 'JP'],
+        })
+
+        writer.write_direct(
+            equities=equities,
+            equity_symbol_mappings=equity_symbol_mappings,
+            equity_supplementary_mappings=equity_supplementary_mappings,
+            exchanges=exchanges,
+        )
+
+        reader = AssetFinder(path)
+
+        equities = reader.retrieve_all(reader.sids)
+        expected_equities = [
+            Equity(
+                0,
+                ExchangeInfo('NYSE', 'NYSE', 'US'),
+                symbol='AYY',
+                asset_name='Ayy Inc.',
+                start_date=pd.Timestamp(0, tz='UTC'),
+                end_date=pd.Timestamp.max.tz_localize('UTC'),
+                first_traded=None,
+                auto_close_date=None,
+                tick_size=0.01,
+                multiplier=1.0,
+            ),
+            Equity(
+                1,
+                ExchangeInfo('TSE', 'TSE', 'JP'),
+                symbol='LMAO',
+                asset_name='Lmao LP',
+                start_date=pd.Timestamp(0, tz='UTC'),
+                end_date=pd.Timestamp.max.tz_localize('UTC'),
+                first_traded=None,
+                auto_close_date=None,
+                tick_size=0.01,
+                multiplier=1.0,
+            )
+        ]
+        assert_equal(equities, expected_equities)
+
+        exchange_info = reader.exchange_info
+        expected_exchange_info = {
+            'NYSE': ExchangeInfo('NYSE', 'NYSE', 'US'),
+            'TSE': ExchangeInfo('TSE', 'TSE', 'JP'),
+        }
+        assert_equal(exchange_info, expected_exchange_info)
+
+        supplementary_map = reader.equity_supplementary_map
+        expected_supplementary_map = {
+            ('QSIP', str(hash('AYY'))): (
+                OwnershipPeriod(
+                    start=pd.Timestamp(0, tz='UTC'),
+                    end=pd.Timestamp.max.tz_localize('UTC'),
+                    sid=0,
+                    value=str(hash('AYY')),
+                ),
+            ),
+            ('QSIP', str(hash('LMAO'))): (
+                OwnershipPeriod(
+                    start=pd.Timestamp(0, tz='UTC'),
+                    end=pd.Timestamp.max.tz_localize('UTC'),
+                    sid=1,
+                    value=str(hash('LMAO')),
+                ),
+            ),
+        }
+        assert_equal(supplementary_map, expected_supplementary_map)
