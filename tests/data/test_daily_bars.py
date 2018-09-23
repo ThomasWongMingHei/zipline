@@ -18,24 +18,30 @@ import re
 from nose_parameterized import parameterized
 from numpy import (
     arange,
+    array,
     datetime64,
+    float64,
     nan,
-)
-from numpy.testing import (
-    assert_array_equal,
+    uint32,
 )
 from pandas import (
+    concat,
     DataFrame,
+    NaT,
     Timestamp,
 )
-from pandas.util.testing import assert_index_equal
 from trading_calendars import get_calendar
 
-from zipline.data.us_equity_pricing import (
-    BcolzDailyBarReader,
-    BcolzDailyBarWriter,
-    NoDataBeforeDate,
-    NoDataAfterDate,
+from zipline.data.bar_reader import NoDataBeforeDate, NoDataAfterDate
+from zipline.data.bcolz_daily_bars import BcolzDailyBarWriter
+from zipline.data.hdf5_daily_bars import (
+    CLOSE,
+    DEFAULT_SCALING_FACTORS,
+    HIGH,
+    LOW,
+    OPEN,
+    VOLUME,
+    coerce_to_uint32,
 )
 from zipline.pipeline.loaders.synthetic import (
     OHLCV,
@@ -49,10 +55,13 @@ from zipline.testing import seconds_to_timestamp
 from zipline.testing.fixtures import (
     WithAssetFinder,
     WithBcolzEquityDailyBarReader,
+    WithEquityDailyBarData,
+    WithHDF5EquityMultiCountryDailyBarReader,
     WithTmpDir,
     WithTradingCalendars,
     ZiplineTestCase,
 )
+from zipline.testing.predicates import assert_equal
 
 TEST_CALENDAR_START = Timestamp('2015-06-01', tz='UTC')
 TEST_CALENDAR_STOP = Timestamp('2015-06-30', tz='UTC')
@@ -61,7 +70,7 @@ TEST_QUERY_START = Timestamp('2015-06-10', tz='UTC')
 TEST_QUERY_STOP = Timestamp('2015-06-19', tz='UTC')
 
 # One asset for each of the cases enumerated in load_raw_arrays_from_bcolz.
-EQUITY_INFO = DataFrame(
+us_info = DataFrame(
     [
         # 1) The equity's trades start and end before query.
         {'start_date': '2015-06-01', 'end_date': '2015-06-05'},
@@ -81,38 +90,77 @@ EQUITY_INFO = DataFrame(
     index=arange(1, 7),
     columns=['start_date', 'end_date'],
 ).astype(datetime64)
+us_info['exchange'] = 'NYSE'
+
+ca_info = DataFrame(
+    [
+        # 1) The equity's trades start and end before query.
+        {'start_date': '2015-06-01', 'end_date': '2015-06-05'},
+        # 2) The equity's trades start and end after query.
+        {'start_date': '2015-06-22', 'end_date': '2015-06-30'},
+        # 3) The equity's data covers all dates in range.
+        {'start_date': '2015-06-02', 'end_date': '2015-06-30'},
+        # 4) The equity's trades start before the query start, but stop
+        #    before the query end.
+        {'start_date': '2015-06-01', 'end_date': '2015-06-15'},
+        # 5) The equity's trades start and end during the query.
+        {'start_date': '2015-06-12', 'end_date': '2015-06-18'},
+        # 6) The equity's trades start during the query, but extend through
+        #    the whole query.
+        {'start_date': '2015-06-15', 'end_date': '2015-06-25'},
+    ],
+    index=arange(7, 13),
+    columns=['start_date', 'end_date'],
+).astype(datetime64)
+ca_info['exchange'] = 'TSX'
+
+EQUITY_INFO = concat([us_info, ca_info])
 EQUITY_INFO['symbol'] = [chr(ord('A') + n) for n in range(len(EQUITY_INFO))]
-EQUITY_INFO['exchange'] = 'TEST'
 
 TEST_QUERY_ASSETS = EQUITY_INFO.index
 
 
-class BcolzDailyBarTestCase(WithBcolzEquityDailyBarReader, ZiplineTestCase):
+class _DailyBarsTestCase(WithEquityDailyBarData, ZiplineTestCase):
     EQUITY_DAILY_BAR_START_DATE = TEST_CALENDAR_START
     EQUITY_DAILY_BAR_END_DATE = TEST_CALENDAR_STOP
+
+    # The country under which these tests should be run.
+    DAILY_BARS_TEST_QUERY_COUNTRY_CODE = 'US'
+
+    @classmethod
+    def init_class_fixtures(cls):
+        super(_DailyBarsTestCase, cls).init_class_fixtures()
+
+        cls.sessions = cls.trading_calendar.sessions_in_range(
+            cls.trading_calendar.minute_to_session_label(TEST_CALENDAR_START),
+            cls.trading_calendar.minute_to_session_label(TEST_CALENDAR_STOP)
+        )
 
     @classmethod
     def make_equity_info(cls):
         return EQUITY_INFO
 
     @classmethod
-    def make_equity_daily_bar_data(cls):
-        return make_bar_data(
-            EQUITY_INFO,
-            cls.equity_daily_bar_days,
-        )
+    def make_exchanges_info(cls, *args, **kwargs):
+        return DataFrame({
+            'exchange': ['NYSE', 'TSX'],
+            'country_code': ['US', 'CA']
+        })
 
     @classmethod
-    def init_class_fixtures(cls):
-        super(BcolzDailyBarTestCase, cls).init_class_fixtures()
-        cls.sessions = cls.trading_calendar.sessions_in_range(
-            cls.trading_calendar.minute_to_session_label(TEST_CALENDAR_START),
-            cls.trading_calendar.minute_to_session_label(TEST_CALENDAR_STOP)
+    def make_equity_daily_bar_data(cls, country_code, sids):
+        return make_bar_data(
+            EQUITY_INFO.loc[list(sids)],
+            cls.equity_daily_bar_days,
         )
 
     @property
     def assets(self):
-        return EQUITY_INFO.index
+        return list(
+            self.asset_finder.equities_sids_for_country_code(
+                self.DAILY_BARS_TEST_QUERY_COUNTRY_CODE
+            )
+        )
 
     def trading_days_between(self, start, end):
         return self.sessions[self.sessions.slice_indexer(start, end)]
@@ -127,86 +175,14 @@ class BcolzDailyBarTestCase(WithBcolzEquityDailyBarReader, ZiplineTestCase):
         start, end = self.asset_start(asset_id), self.asset_end(asset_id)
         return self.trading_days_between(start, end)
 
-    def test_write_ohlcv_content(self):
-        result = self.bcolz_daily_bar_ctable
-        for column in OHLCV:
-            idx = 0
-            data = result[column][:]
-            multiplier = 1 if column == 'volume' else 1000
-            for asset_id in self.assets:
-                for date in self.dates_for_asset(asset_id):
-                    self.assertEqual(
-                        expected_bar_value(
-                            asset_id,
-                            date,
-                            column
-                        ) * multiplier,
-                        data[idx],
-                    )
-                    idx += 1
-            self.assertEqual(idx, len(data))
-
-    def test_write_day_and_id(self):
-        result = self.bcolz_daily_bar_ctable
-        idx = 0
-        ids = result['id']
-        days = result['day']
-        for asset_id in self.assets:
-            for date in self.dates_for_asset(asset_id):
-                self.assertEqual(ids[idx], asset_id)
-                self.assertEqual(date, seconds_to_timestamp(days[idx]))
-                idx += 1
-
-    def test_write_attrs(self):
-        result = self.bcolz_daily_bar_ctable
-        expected_first_row = {
-            '1': 0,
-            '2': 5,   # Asset 1 has 5 trading days.
-            '3': 12,  # Asset 2 has 7 trading days.
-            '4': 33,  # Asset 3 has 21 trading days.
-            '5': 44,  # Asset 4 has 11 trading days.
-            '6': 49,  # Asset 5 has 5 trading days.
-        }
-        expected_last_row = {
-            '1': 4,
-            '2': 11,
-            '3': 32,
-            '4': 43,
-            '5': 48,
-            '6': 57,    # Asset 6 has 9 trading days.
-        }
-        expected_calendar_offset = {
-            '1': 0,   # Starts on 6-01, 1st trading day of month.
-            '2': 15,  # Starts on 6-22, 16th trading day of month.
-            '3': 1,   # Starts on 6-02, 2nd trading day of month.
-            '4': 0,   # Starts on 6-01, 1st trading day of month.
-            '5': 9,   # Starts on 6-12, 10th trading day of month.
-            '6': 10,  # Starts on 6-15, 11th trading day of month.
-        }
-        self.assertEqual(result.attrs['first_row'], expected_first_row)
-        self.assertEqual(result.attrs['last_row'], expected_last_row)
-        self.assertEqual(
-            result.attrs['calendar_offset'],
-            expected_calendar_offset,
-        )
-        cal = get_calendar(result.attrs['calendar_name'])
-        first_session = Timestamp(result.attrs['start_session_ns'], tz='UTC')
-        end_session = Timestamp(result.attrs['end_session_ns'], tz='UTC')
-        sessions = cal.sessions_in_range(first_session, end_session)
-
-        assert_index_equal(
-            self.sessions,
-            sessions
-        )
-
     def test_read_first_trading_day(self):
         self.assertEqual(
-            self.bcolz_equity_daily_bar_reader.first_trading_day,
+            self.daily_bar_reader.first_trading_day,
             self.sessions[0],
         )
 
     def _check_read_results(self, columns, assets, start_date, end_date):
-        results = self.bcolz_equity_daily_bar_reader.load_raw_arrays(
+        results = self.daily_bar_reader.load_raw_arrays(
             columns,
             start_date,
             end_date,
@@ -214,11 +190,11 @@ class BcolzDailyBarTestCase(WithBcolzEquityDailyBarReader, ZiplineTestCase):
         )
         dates = self.trading_days_between(start_date, end_date)
         for column, result in zip(columns, results):
-            assert_array_equal(
+            assert_equal(
                 result,
                 expected_bar_values_2d(
                     dates,
-                    EQUITY_INFO,
+                    EQUITY_INFO.loc[assets],
                     column,
                 )
             )
@@ -294,7 +270,8 @@ class BcolzDailyBarTestCase(WithBcolzEquityDailyBarReader, ZiplineTestCase):
             )
 
     def test_unadjusted_get_value(self):
-        reader = self.bcolz_equity_daily_bar_reader
+        reader = self.daily_bar_reader
+
         # At beginning
         price = reader.get_value(1, Timestamp('2015-06-01', tz='UTC'),
                                  'close')
@@ -321,8 +298,7 @@ class BcolzDailyBarTestCase(WithBcolzEquityDailyBarReader, ZiplineTestCase):
         self.assertEqual(109631, volume)
 
     def test_unadjusted_get_value_no_data(self):
-        table = self.bcolz_daily_bar_ctable
-        reader = BcolzDailyBarReader(table)
+        reader = self.daily_bar_reader
         # before
         with self.assertRaises(NoDataBeforeDate):
             reader.get_value(2, Timestamp('2015-06-08', tz='UTC'), 'close')
@@ -330,6 +306,126 @@ class BcolzDailyBarTestCase(WithBcolzEquityDailyBarReader, ZiplineTestCase):
         # after
         with self.assertRaises(NoDataAfterDate):
             reader.get_value(4, Timestamp('2015-06-16', tz='UTC'), 'close')
+
+    def test_get_last_traded_dt(self):
+        for sid in self.assets:
+            assert_equal(
+                self.daily_bar_reader.get_last_traded_dt(
+                    self.asset_finder.retrieve_asset(sid),
+                    self.EQUITY_DAILY_BAR_END_DATE,
+                ),
+                self.asset_end(sid),
+            )
+
+            # If an asset is alive by ``mid_date``, its "last trade" dt
+            # is either the end date for the asset, or ``mid_date`` if
+            # the asset is *still* alive at that point. Otherwise, it
+            # is pd.NaT.
+            mid_date = Timestamp('2015-06-15', tz='UTC')
+            if self.asset_start(sid) <= mid_date:
+                expected = min(self.asset_end(sid), mid_date)
+            else:
+                expected = NaT
+
+            assert_equal(
+                self.daily_bar_reader.get_last_traded_dt(
+                    self.asset_finder.retrieve_asset(sid),
+                    mid_date,
+                ),
+                expected,
+            )
+
+            # If the dt passed comes before any of the assets
+            # start trading, the "last traded" dt for each is pd.NaT.
+            assert_equal(
+                self.daily_bar_reader.get_last_traded_dt(
+                    self.asset_finder.retrieve_asset(sid),
+                    Timestamp(0, tz='UTC'),
+                ),
+                NaT,
+            )
+
+
+class BcolzDailyBarTestCase(WithBcolzEquityDailyBarReader, _DailyBarsTestCase):
+    EQUITY_DAILY_BAR_COUNTRY_CODES = ['US']
+
+    @classmethod
+    def init_class_fixtures(cls):
+        super(BcolzDailyBarTestCase, cls).init_class_fixtures()
+
+        cls.daily_bar_reader = cls.bcolz_equity_daily_bar_reader
+
+    def test_write_ohlcv_content(self):
+        result = self.bcolz_daily_bar_ctable
+        for column in OHLCV:
+            idx = 0
+            data = result[column][:]
+            multiplier = 1 if column == 'volume' else 1000
+            for asset_id in self.assets:
+                for date in self.dates_for_asset(asset_id):
+                    self.assertEqual(
+                        expected_bar_value(
+                            asset_id,
+                            date,
+                            column
+                        ) * multiplier,
+                        data[idx],
+                    )
+                    idx += 1
+            self.assertEqual(idx, len(data))
+
+    def test_write_day_and_id(self):
+        result = self.bcolz_daily_bar_ctable
+        idx = 0
+        ids = result['id']
+        days = result['day']
+        for asset_id in self.assets:
+            for date in self.dates_for_asset(asset_id):
+                self.assertEqual(ids[idx], asset_id)
+                self.assertEqual(date, seconds_to_timestamp(days[idx]))
+                idx += 1
+
+    def test_write_attrs(self):
+        result = self.bcolz_daily_bar_ctable
+        expected_first_row = {
+            '1': 0,
+            '2': 5,   # Asset 1 has 5 trading days.
+            '3': 12,  # Asset 2 has 7 trading days.
+            '4': 33,  # Asset 3 has 21 trading days.
+            '5': 44,  # Asset 4 has 11 trading days.
+            '6': 49,  # Asset 5 has 5 trading days.
+        }
+        expected_last_row = {
+            '1': 4,
+            '2': 11,
+            '3': 32,
+            '4': 43,
+            '5': 48,
+            '6': 57,    # Asset 6 has 9 trading days.
+        }
+        expected_calendar_offset = {
+            '1': 0,   # Starts on 6-01, 1st trading day of month.
+            '2': 15,  # Starts on 6-22, 16th trading day of month.
+            '3': 1,   # Starts on 6-02, 2nd trading day of month.
+            '4': 0,   # Starts on 6-01, 1st trading day of month.
+            '5': 9,   # Starts on 6-12, 10th trading day of month.
+            '6': 10,  # Starts on 6-15, 11th trading day of month.
+        }
+        self.assertEqual(result.attrs['first_row'], expected_first_row)
+        self.assertEqual(result.attrs['last_row'], expected_last_row)
+        self.assertEqual(
+            result.attrs['calendar_offset'],
+            expected_calendar_offset,
+        )
+        cal = get_calendar(result.attrs['calendar_name'])
+        first_session = Timestamp(result.attrs['start_session_ns'], tz='UTC')
+        end_session = Timestamp(result.attrs['end_session_ns'], tz='UTC')
+        sessions = cal.sessions_in_range(first_session, end_session)
+
+        assert_equal(
+            self.sessions,
+            sessions
+        )
 
     def test_unadjusted_get_value_empty_value(self):
         reader = self.bcolz_equity_daily_bar_reader
@@ -347,7 +443,7 @@ class BcolzDailyBarTestCase(WithBcolzEquityDailyBarReader, ZiplineTestCase):
             reader._spot_col('close')[zero_ix] = 0
 
             close = reader.get_value(zero_sid, zero_day, 'close')
-            assert_array_equal(nan, close)
+            assert_equal(nan, close)
         finally:
             reader._spot_col('close')[zero_ix] = old
 
@@ -381,7 +477,9 @@ class BcolzDailyBarWriterMissingDataTestCase(WithAssetFinder,
 
     @classmethod
     def make_equity_info(cls):
-        return EQUITY_INFO.loc[EQUITY_INFO.index == cls.MISSING_DATA_SID]
+        return (
+            EQUITY_INFO.loc[EQUITY_INFO.index == cls.MISSING_DATA_SID].copy()
+        )
 
     def test_missing_values_assertion(self):
         sessions = self.trading_calendar.sessions_in_range(
@@ -410,3 +508,39 @@ class BcolzDailyBarWriterMissingDataTestCase(WithAssetFinder,
         )
         with self.assertRaisesRegexp(AssertionError, expected_msg):
             writer.write(bar_data)
+
+
+class HDF5DailyBarUSTestCase(WithHDF5EquityMultiCountryDailyBarReader,
+                             _DailyBarsTestCase):
+    @classmethod
+    def init_class_fixtures(cls):
+        super(HDF5DailyBarUSTestCase, cls).init_class_fixtures()
+
+        cls.daily_bar_reader = cls.hdf5_equity_daily_bar_reader
+
+    @parameterized.expand([
+        (OPEN, array([1, 1000, 100000, 100500, 1000005], dtype=uint32)),
+        (HIGH, array([1, 1000, 100000, 100500, 1000005], dtype=uint32)),
+        (LOW, array([1, 1000, 100000, 100500, 1000005], dtype=uint32)),
+        (CLOSE, array([1, 1000, 100000, 100500, 1000005], dtype=uint32)),
+        (VOLUME, array([0, 1, 100, 100, 1000], dtype=uint32)),
+    ])
+    def test_coerce_to_uint32_price(self, field, expected):
+        coerced = coerce_to_uint32(
+            array([0.001, 1, 100, 100.5, 1000.005], dtype=float64),
+            field,
+            DEFAULT_SCALING_FACTORS[field],
+        )
+
+        assert_equal(coerced, expected)
+
+
+class HDF5DailyBarCanadaTestCase(WithHDF5EquityMultiCountryDailyBarReader,
+                                 _DailyBarsTestCase):
+    DAILY_BARS_TEST_QUERY_COUNTRY_CODE = 'CA'
+
+    @classmethod
+    def init_class_fixtures(cls):
+        super(HDF5DailyBarCanadaTestCase, cls).init_class_fixtures()
+
+        cls.daily_bar_reader = cls.hdf5_equity_daily_bar_reader

@@ -330,32 +330,6 @@ class AssetFinder(object):
             for name, canonical_name, country_code in es
         }
 
-    def _reset_caches(self):
-        """
-        Reset our asset caches.
-
-        You probably shouldn't call this method.
-        """
-        # This method exists as a workaround for the in-place mutating behavior
-        # of `TradingAlgorithm._write_and_map_id_index_to_sids`.  No one else
-        # should be calling this.
-        for cache in self._caches:
-            cache.clear()
-        self.reload_symbol_maps()
-        del type(self).exchanges[self]
-
-    def reload_symbol_maps(self):
-        """Clear the in memory symbol lookup maps.
-
-        This will make any changes to the underlying db available to the
-        symbol maps.
-        """
-        # clear the lazyval caches, the next access will requery
-        for attr in dir(type(self)):
-            value = getattr(self, attr)
-            if isinstance(value, lazyval):
-                del value[self]
-
     @lazyval
     def symbol_ownership_map(self):
         out = {}
@@ -384,6 +358,10 @@ class AssetFinder(object):
             value_from_row=lambda row: row.symbol,
             group_key=lambda row: sid_to_country_code[row.sid],
         )
+
+    @lazyval
+    def country_codes(self):
+        return tuple(self.symbol_ownership_maps_by_country_code)
 
     @staticmethod
     def _fuzzify_symbol_ownership_map(ownership_map):
@@ -1134,12 +1112,7 @@ class AssetFinder(object):
         # no equity held the value on the given asof date
         raise ValueNotFoundForField(field=field_name, value=value)
 
-    def get_supplementary_field(
-        self,
-        sid,
-        field_name,
-        as_of_date,
-    ):
+    def get_supplementary_field(self, sid, field_name, as_of_date):
         """Get the value of a supplementary field for an asset.
 
         Parameters
@@ -1528,13 +1501,15 @@ class AssetFinder(object):
         numpy.putmask
         zipline.pipeline.engine.SimplePipelineEngine._compute_root_mask
         """
-        # normalize this to a cache-key
+        if isinstance(country_codes, string_types):
+            raise TypeError(
+                "Got string {!r} instead of an iterable of strings in "
+                "AssetFinder.lifetimes.".format(country_codes),
+            )
+
+        # normalize to a cache-key so that we can memoize results.
         country_codes = frozenset(country_codes)
 
-        # This is a less than ideal place to do this, because if someone adds
-        # assets to the finder after we've touched lifetimes we won't have
-        # those new assets available.  Mutability is not my favorite
-        # programming feature.
         lifetimes = self._asset_lifetimes.get(country_codes)
         if lifetimes is None:
             self._asset_lifetimes[country_codes] = lifetimes = (
@@ -1549,6 +1524,22 @@ class AssetFinder(object):
         mask &= (raw_dates <= lifetimes.end)
 
         return pd.DataFrame(mask, index=dates, columns=lifetimes.sid)
+
+    def equities_sids_for_country_code(self, country_code):
+        """Return all of the sids for a given country.
+
+        Parameters
+        ----------
+        country_code : str
+            An ISO 3166 alpha-2 country code.
+
+        Returns
+        -------
+        tuple[int]
+            The sids whose exchanges are in this country.
+        """
+        sids = self._compute_asset_lifetimes([country_code]).sid
+        return tuple(sids.tolist())
 
 
 class AssetConvertible(with_metaclass(ABCMeta)):

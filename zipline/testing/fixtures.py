@@ -6,9 +6,9 @@ import warnings
 from contextlib2 import ExitStack
 from logbook import NullHandler, Logger
 import pandas as pd
-from six import with_metaclass, iteritems
+from six import with_metaclass, iteritems, itervalues
 import responses
-from toolz import flip, merge
+from toolz import flip, groupby, merge
 from trading_calendars import (
     get_calendar,
     register_calendar_alias,
@@ -19,8 +19,10 @@ from zipline.algorithm import TradingAlgorithm
 from zipline.assets import Equity, Future
 from zipline.assets.continuous_futures import CHAIN_PREDICATES
 from zipline.finance.asset_restrictions import NoRestrictions
+from zipline.utils.memoize import classlazyval
 from zipline.pipeline import SimplePipelineEngine
 from zipline.pipeline.data import USEquityPricing
+from zipline.pipeline.domain import GENERIC, US_EQUITIES
 from zipline.pipeline.loaders import USEquityPricingLoader
 from zipline.pipeline.loaders.testing import make_seeded_random_loader
 from zipline.protocol import BarData
@@ -33,10 +35,23 @@ from .core import (
     tmp_dir,
 )
 from .debug import debug_mro_failure
+from ..data.adjustments import (
+    SQLiteAdjustmentReader,
+    SQLiteAdjustmentWriter,
+)
+from ..data.bcolz_daily_bars import (
+    BcolzDailyBarReader,
+    BcolzDailyBarWriter,
+)
 from ..data.data_portal import (
     DataPortal,
     DEFAULT_MINUTE_HISTORY_PREFETCH,
     DEFAULT_DAILY_HISTORY_PREFETCH,
+)
+from ..data.hdf5_daily_bars import (
+    HDF5DailyBarReader,
+    HDF5DailyBarWriter,
+    MultiCountryDailyBarReader,
 )
 from ..data.loader import (
     get_benchmark_filename,
@@ -51,12 +66,7 @@ from ..data.resample import (
     minute_frame_to_session_frame,
     MinuteResampleSessionBarReader
 )
-from ..data.us_equity_pricing import (
-    BcolzDailyBarReader,
-    BcolzDailyBarWriter,
-    SQLiteAdjustmentReader,
-    SQLiteAdjustmentWriter,
-)
+
 from ..finance.trading import SimulationParameters
 from ..utils.classproperty import classproperty
 from ..utils.final import FinalMeta, final
@@ -447,6 +457,31 @@ class WithAssetFinder(WithDefaultDateBounds):
         super(WithAssetFinder, cls).init_class_fixtures()
         cls.asset_finder = cls.make_asset_finder()
 
+    @classlazyval
+    def all_assets(cls):
+        """A list of Assets for all sids in cls.asset_finder.
+        """
+        return cls.asset_finder.retrieve_all(cls.asset_finder.sids)
+
+    @classlazyval
+    def exchange_names(cls):
+        """A list of canonical exchange names for all exchanges in this suite.
+        """
+        infos = itervalues(cls.asset_finder.exchange_info)
+        return sorted(i.canonical_name for i in infos)
+
+    @classlazyval
+    def assets_by_calendar(cls):
+        """A dict from calendar -> list of assets with that calendar.
+        """
+        return groupby(lambda a: get_calendar(a.exchange), cls.all_assets)
+
+    @classlazyval
+    def all_calendars(cls):
+        """A list of all calendars for assets in this test suite.
+        """
+        return list(cls.assets_by_calendar)
+
 
 class WithTradingCalendars(object):
     """
@@ -725,6 +760,9 @@ class WithEquityDailyBarData(WithAssetFinder, WithTradingCalendars):
         If this flag is set, `make_equity_daily_bar_data` will read data from
         the minute bars defined by `WithEquityMinuteBarData`.
         The current default is `False`, but could be `True` in the future.
+    EQUITY_DAILY_BAR_COUNTRY_CODES : tuple
+        The countres to create data for. By default this is populated
+        with all of the countries present in the asset finder.
 
     Methods
     -------
@@ -754,6 +792,10 @@ class WithEquityDailyBarData(WithAssetFinder, WithTradingCalendars):
         else:
             return 0
 
+    @classproperty
+    def EQUITY_DAILY_BAR_COUNTRY_CODES(cls):
+        return cls.asset_finder.country_codes
+
     @classmethod
     def _make_equity_daily_bar_from_minute(cls):
         assert issubclass(cls, WithEquityMinuteBarData), \
@@ -766,7 +808,24 @@ class WithEquityDailyBarData(WithAssetFinder, WithTradingCalendars):
                 cls.trading_calendars[Equity])
 
     @classmethod
-    def make_equity_daily_bar_data(cls):
+    def make_equity_daily_bar_data(cls, country_code, sids):
+        """
+        Parameters
+        ----------
+        country_code : str
+            An ISO 3166 alpha-2 country code. Data should be created for
+            this country.
+        sids : tuple[int]
+            The sids to include in the data.
+
+        Yields
+        ------
+        (int, pd.DataFrame)
+            A sid, dataframe pair to be passed to a daily bar writer.
+            The dataframe should be indexed by date, with columns of
+            ('open', 'high', 'low', 'close', 'volume', 'day', & 'id').
+        """
+
         # Requires a WithEquityMinuteBarData to come before in the MRO.
         # Resample that data so that daily and minute bar data are aligned.
         if cls.EQUITY_DAILY_BAR_SOURCE_FROM_MINUTE:
@@ -950,6 +1009,7 @@ class WithBcolzEquityDailyBarReader(WithEquityDailyBarData, WithTmpDir):
     """
     BCOLZ_DAILY_BAR_PATH = 'daily_equity_pricing.bcolz'
     BCOLZ_DAILY_BAR_READ_ALL_THRESHOLD = None
+    BCOLZ_DAILY_BAR_COUNTRY_CODE = None
     EQUITY_DAILY_BAR_SOURCE_FROM_MINUTE = False
     # allows WithBcolzEquityDailyBarReaderFromCSVs to call the
     # `write_csvs`method without needing to reimplement `init_class_fixtures`
@@ -957,6 +1017,10 @@ class WithBcolzEquityDailyBarReader(WithEquityDailyBarData, WithTmpDir):
     # What to do when data being written is invalid, e.g. nan, inf, etc.
     # options are: 'warn', 'raise', 'ignore'
     INVALID_DATA_BEHAVIOR = 'warn'
+
+    @classproperty
+    def BCOLZ_DAILY_BAR_COUNTRY_CODE(cls):
+        return cls.EQUITY_DAILY_BAR_COUNTRY_CODES[0]
 
     @classmethod
     def make_bcolz_daily_bar_rootdir_path(cls):
@@ -967,14 +1031,21 @@ class WithBcolzEquityDailyBarReader(WithEquityDailyBarData, WithTmpDir):
         super(WithBcolzEquityDailyBarReader, cls).init_class_fixtures()
 
         cls.bcolz_daily_bar_path = p = cls.make_bcolz_daily_bar_rootdir_path()
+
         days = cls.equity_daily_bar_days
+        sids = cls.asset_finder.equities_sids_for_country_code(
+            cls.BCOLZ_DAILY_BAR_COUNTRY_CODE
+        )
 
         trading_calendar = cls.trading_calendars[Equity]
         cls.bcolz_daily_bar_ctable = t = getattr(
             BcolzDailyBarWriter(p, trading_calendar, days[0], days[-1]),
             cls._write_method_name,
         )(
-            cls.make_equity_daily_bar_data(),
+            cls.make_equity_daily_bar_data(
+                country_code=cls.BCOLZ_DAILY_BAR_COUNTRY_CODE,
+                sids=sids,
+            ),
             invalid_data_behavior=cls.INVALID_DATA_BEHAVIOR
         )
 
@@ -1096,6 +1167,87 @@ def _trading_days_for_minute_bars(calendar,
         )[0]
 
     return calendar.sessions_in_range(first_session, end_date)
+
+
+class WithHDF5EquityMultiCountryDailyBarReader(WithEquityDailyBarData,
+                                               WithTmpDir):
+
+    """
+    ZiplineTestCase mixin providing cls.hdf5_daily_bar_path and
+    cls.hdf5_equity_daily_bar_reader class level fixtures.
+
+    After init_class_fixtures has been called:
+    - `cls.hdf5_daily_bar_path` is populated with
+      `cls.tmpdir.getpath(cls.HDF5_DAILY_BAR_PATH)`.
+    - The file at `cls.hdf5_daily_bar_path` is populated with data returned
+      from `cls.make_equity_daily_bar_data`. By default this calls
+      :func:`zipline.pipeline.loaders.synthetic.make_equity_daily_bar_data`.
+    - `cls.hdf5_equity_daily_bar_reader` is a daily bar reader pointing
+      to the file that was just written to.
+
+    Attributes
+    ----------
+    HDF5_DAILY_BAR_PATH : str
+        The path inside the tmpdir where this will be written.
+    HDF5_DAILY_BAR_COUNTRY_CODE : str
+        The ISO 3166 alpha-2 country code for the country to write/read.
+
+    Methods
+    -------
+    make_hdf5_daily_bar_path() -> string
+        A class method that returns the path for the rootdir of the daily
+        bars ctable. By default this is a subdirectory HDF5_DAILY_BAR_PATH in
+        the shared temp directory.
+
+    See Also
+    --------
+    WithDataPortal
+    zipline.testing.create_daily_bar_data
+    """
+    HDF5_DAILY_BAR_PATH = 'daily_equity_pricing.h5'
+    HDF5_DAILY_BAR_COUNTRY_CODES = alias('EQUITY_DAILY_BAR_COUNTRY_CODES')
+    HDF5_DAILY_BAR_DATE_CHUNK_SIZE = 30
+
+    @classmethod
+    def make_hdf5_daily_bar_path(cls):
+        return cls.tmpdir.getpath(cls.HDF5_DAILY_BAR_PATH)
+
+    @classmethod
+    def init_class_fixtures(cls):
+        super(
+            WithHDF5EquityMultiCountryDailyBarReader,
+            cls,
+        ).init_class_fixtures()
+
+        cls.hdf5_daily_bar_path = p = cls.make_hdf5_daily_bar_path()
+
+        chunksize = cls.HDF5_DAILY_BAR_DATE_CHUNK_SIZE
+        writer = HDF5DailyBarWriter(p, chunksize)
+
+        asset_finder = cls.asset_finder
+        for country_code in cls.HDF5_DAILY_BAR_COUNTRY_CODES:
+            sids = asset_finder.equities_sids_for_country_code(country_code)
+
+            writer.write_from_sid_df_pairs(
+                country_code,
+                cls.make_equity_daily_bar_data(
+                    country_code=country_code,
+                    sids=sids,
+                ),
+            )
+
+        # Use the h5 file through a class level context manager, so the
+        # file is properly closed when the test case exits.
+        f = cls.enter_class_context(writer.h5_file(mode='r'))
+
+        cls.single_country_hdf5_equity_daily_bar_readers = {
+            country_code: HDF5DailyBarReader.from_file(f, country_code)
+            for country_code in f
+        }
+
+        cls.hdf5_equity_daily_bar_reader = MultiCountryDailyBarReader(
+            cls.single_country_hdf5_equity_daily_bar_readers
+        )
 
 
 class WithEquityMinuteBarData(WithAssetFinder, WithTradingCalendars):
@@ -1487,8 +1639,8 @@ class WithAdjustmentReader(WithBcolzEquityDailyBarReader):
         cls.adjustment_reader = SQLiteAdjustmentReader(conn)
 
 
-class WithEquityPricingPipelineEngine(WithAdjustmentReader,
-                                      WithTradingSessions):
+class WithUSEquityPricingPipelineEngine(WithAdjustmentReader,
+                                        WithTradingSessions):
     """
     Mixin providing the following as a class-level fixtures.
         - cls.data_root_dir
@@ -1497,11 +1649,12 @@ class WithEquityPricingPipelineEngine(WithAdjustmentReader,
         - cls.adjustments_db_path
 
     """
+
     @classmethod
     def init_class_fixtures(cls):
         cls.data_root_dir = cls.enter_class_context(tmp_dir())
         cls.findata_dir = cls.data_root_dir.makedir('findata')
-        super(WithEquityPricingPipelineEngine, cls).init_class_fixtures()
+        super(WithUSEquityPricingPipelineEngine, cls).init_class_fixtures()
 
         loader = USEquityPricingLoader(
             cls.bcolz_equity_daily_bar_reader,
@@ -1516,8 +1669,8 @@ class WithEquityPricingPipelineEngine(WithAdjustmentReader,
 
         cls.pipeline_engine = SimplePipelineEngine(
             get_loader=get_loader,
-            calendar=cls.nyse_sessions,
             asset_finder=cls.asset_finder,
+            default_domain=US_EQUITIES,
         )
 
     @classmethod
@@ -1559,6 +1712,7 @@ class WithSeededRandomPipelineEngine(WithTradingSessions, WithAssetFinder):
     zipline.pipeline.engine.SimplePipelineEngine
     """
     SEEDED_RANDOM_PIPELINE_SEED = 42
+    SEEDED_RANDOM_PIPELINE_DEFAULT_DOMAIN = GENERIC
 
     @classmethod
     def init_class_fixtures(cls):
@@ -1571,8 +1725,8 @@ class WithSeededRandomPipelineEngine(WithTradingSessions, WithAssetFinder):
         )
         cls.seeded_random_engine = SimplePipelineEngine(
             get_loader=lambda column: loader,
-            calendar=cls.trading_days,
             asset_finder=cls.asset_finder,
+            default_domain=cls.SEEDED_RANDOM_PIPELINE_DEFAULT_DOMAIN,
         )
 
     def raw_expected_values(self, column, start_date, end_date):
