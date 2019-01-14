@@ -11,13 +11,37 @@ from zipline.pipeline.data import Column, DataSet
 from zipline.pipeline.data.testing import TestingDataSet
 from zipline.pipeline.domain import (
     AmbiguousDomain,
+    AT_EQUITIES,
+    AU_EQUITIES,
+    BE_EQUITIES,
+    BR_EQUITIES,
+    BUILT_IN_DOMAINS,
     CA_EQUITIES,
-    GENERIC,
-    infer_domain,
-    GB_EQUITIES,
-    US_EQUITIES,
+    CN_EQUITIES,
+    CH_EQUITIES,
+    DE_EQUITIES,
+    DK_EQUITIES,
     EquityCalendarDomain,
     EquitySessionDomain,
+    ES_EQUITIES,
+    FI_EQUITIES,
+    FR_EQUITIES,
+    GB_EQUITIES,
+    GENERIC,
+    HK_EQUITIES,
+    IE_EQUITIES,
+    IN_EQUITIES,
+    infer_domain,
+    IT_EQUITIES,
+    JP_EQUITIES,
+    KR_EQUITIES,
+    NL_EQUITIES,
+    NO_EQUITIES,
+    NZ_EQUITIES,
+    PT_EQUITIES,
+    SE_EQUITIES,
+    SG_EQUITIES,
+    US_EQUITIES,
 )
 from zipline.pipeline.factors import CustomFactor
 import zipline.testing.fixtures as zf
@@ -76,7 +100,7 @@ class MixedGenericsTestCase(zf.WithSeededRandomPipelineEngine,
 
 class SpecializeTestCase(zf.ZiplineTestCase):
 
-    @parameter_space(domain=[US_EQUITIES, CA_EQUITIES, GB_EQUITIES])
+    @parameter_space(domain=BUILT_IN_DOMAINS)
     def test_specialize(self, domain):
         class MyData(DataSet):
             col1 = Column(dtype=float)
@@ -122,7 +146,7 @@ class SpecializeTestCase(zf.ZiplineTestCase):
         do_checks(MyData, ['col1', 'col2', 'col3'])
         do_checks(MyDataSubclass, ['col1', 'col2', 'col3', 'col4'])
 
-    @parameter_space(domain=[US_EQUITIES, CA_EQUITIES, GB_EQUITIES])
+    @parameter_space(domain=BUILT_IN_DOMAINS)
     def test_unspecialize(self, domain):
 
         class MyData(DataSet):
@@ -154,7 +178,7 @@ class SpecializeTestCase(zf.ZiplineTestCase):
         do_checks(MyData, ['col1', 'col2', 'col3'])
         do_checks(MyDataSubclass, ['col1', 'col2', 'col3', 'col4'])
 
-    @parameter_space(domain_param=[US_EQUITIES, CA_EQUITIES])
+    @parameter_space(domain_param=[BE_EQUITIES, CA_EQUITIES, CH_EQUITIES])
     def test_specialized_root(self, domain_param):
         different_domain = GB_EQUITIES
 
@@ -279,13 +303,14 @@ class InferDomainTestCase(zf.ZiplineTestCase):
 
     def test_ambiguous_domain_repr(self):
         err = AmbiguousDomain([CA_EQUITIES, GB_EQUITIES, US_EQUITIES])
+
         result = str(err)
         expected = dedent(
             """\
             Found terms with conflicting domains:
-              - EquityCalendarDomain('CA', 'TSX')
-              - EquityCalendarDomain('GB', 'LSE')
-              - EquityCalendarDomain('US', 'NYSE')"""
+              - EquityCalendarDomain('CA', 'XTSE')
+              - EquityCalendarDomain('GB', 'XLON')
+              - EquityCalendarDomain('US', 'XNYS')"""
         )
         assert_messages_equal(result, expected)
 
@@ -312,17 +337,49 @@ class DataQueryCutoffForSessionTestCase(zf.ZiplineTestCase):
 
         assert_equal(actual, expected, check_names=False)
 
-    def test_equity_calendar_domain(self):
+    def test_built_in_equity_calendar_domain_defaults(self):
         # test the defaults
-        self._test_equity_calendar_domain(US_EQUITIES, datetime.time(8, 45))
-        self._test_equity_calendar_domain(CA_EQUITIES, datetime.time(8, 45))
-        self._test_equity_calendar_domain(GB_EQUITIES, datetime.time(7, 15))
+        expected_cutoff_times = {
+            AT_EQUITIES: datetime.time(8, 15),
+            AU_EQUITIES: datetime.time(9, 15),
+            BE_EQUITIES: datetime.time(8, 15),
+            BR_EQUITIES: datetime.time(9, 15),
+            CA_EQUITIES: datetime.time(8, 45),
+            CH_EQUITIES: datetime.time(8, 15),
+            CN_EQUITIES: datetime.time(8, 45),
+            DE_EQUITIES: datetime.time(8, 15),
+            DK_EQUITIES: datetime.time(8, 15),
+            ES_EQUITIES: datetime.time(8, 15),
+            FI_EQUITIES: datetime.time(9, 15),
+            FR_EQUITIES: datetime.time(8, 15),
+            GB_EQUITIES: datetime.time(7, 15),
+            HK_EQUITIES: datetime.time(9, 15),
+            IE_EQUITIES: datetime.time(7, 15),
+            IN_EQUITIES: datetime.time(8, 30),
+            IT_EQUITIES: datetime.time(8, 15),
+            JP_EQUITIES: datetime.time(8, 15),
+            KR_EQUITIES: datetime.time(8, 15),
+            NL_EQUITIES: datetime.time(8, 15),
+            NO_EQUITIES: datetime.time(8, 15),
+            NZ_EQUITIES: datetime.time(9, 15),
+            PT_EQUITIES: datetime.time(7, 15),
+            SE_EQUITIES: datetime.time(8, 15),
+            SG_EQUITIES: datetime.time(8, 15),
+            US_EQUITIES: datetime.time(8, 45),
+        }
 
+        # make sure we are not missing any domains in this test
+        self.assertEqual(set(expected_cutoff_times), set(BUILT_IN_DOMAINS))
+
+        for domain, expected_cutoff_time in expected_cutoff_times.items():
+            self._test_equity_calendar_domain(domain, expected_cutoff_time)
+
+    def test_equity_calendar_domain(self):
         # test non-default time
         self._test_equity_calendar_domain(
             EquityCalendarDomain(
                 CountryCode.UNITED_STATES,
-                'NYSE',
+                'XNYS',
                 data_query_offset=-datetime.timedelta(hours=2, minutes=30),
             ),
             datetime.time(7, 0),
@@ -332,7 +389,7 @@ class DataQueryCutoffForSessionTestCase(zf.ZiplineTestCase):
         self._test_equity_calendar_domain(
             EquityCalendarDomain(
                 CountryCode.UNITED_STATES,
-                'NYSE',
+                'XNYS',
                 data_query_offset=-datetime.timedelta(hours=10),
             ),
             datetime.time(23, 30),
@@ -343,14 +400,14 @@ class DataQueryCutoffForSessionTestCase(zf.ZiplineTestCase):
         self._test_equity_calendar_domain(
             EquityCalendarDomain(
                 CountryCode.UNITED_STATES,
-                'NYSE',
+                'XNYS',
                 data_query_offset=-datetime.timedelta(hours=24 * 6 + 10),
             ),
             datetime.time(23, 30),
             expected_cutoff_date_offset=-7,
         )
 
-    @parameter_space(domain=(US_EQUITIES, CA_EQUITIES, GB_EQUITIES))
+    @parameter_space(domain=BUILT_IN_DOMAINS)
     def test_equity_calendar_not_aligned(self, domain):
         valid_sessions = domain.all_sessions()[:50]
         sessions = pd.date_range(valid_sessions[0], valid_sessions[-1])
@@ -430,3 +487,81 @@ class DataQueryCutoffForSessionTestCase(zf.ZiplineTestCase):
         actual = domain.data_query_cutoff_for_sessions(utc_sessions)
 
         assert_equal(expected, actual)
+
+
+class RollForwardTestCase(zf.ZiplineTestCase):
+
+    def test_roll_forward(self):
+        #     January 2017
+        # Su Mo Tu We Th Fr Sa
+        #  1  2  3  4  5  6  7
+
+        # the first three days of the year are holidays on the Tokyo exchange,
+        # so the first trading day should be the fourth
+        self.assertEqual(
+            JP_EQUITIES.roll_forward('2017-01-01'),
+            pd.Timestamp('2017-01-04', tz='UTC'),
+        )
+
+        # in US exchanges, the first trading day after 1/1 is the 3rd
+        self.assertEqual(
+            US_EQUITIES.roll_forward('2017-01-01'),
+            pd.Timestamp('2017-01-03', tz='UTC'),
+        )
+
+        # passing a valid trading day to roll_forward should return that day
+        self.assertEqual(
+            JP_EQUITIES.roll_forward('2017-01-04'),
+            pd.Timestamp('2017-01-04', tz='UTC'),
+        )
+
+        # passing a date before the first session should return the
+        # first session
+        before_first_session = \
+            JP_EQUITIES.calendar.first_session - pd.Timedelta(days=20)
+
+        self.assertEqual(
+            JP_EQUITIES.roll_forward(before_first_session),
+            JP_EQUITIES.calendar.first_session
+        )
+
+        # requesting a session beyond the last session raises an ValueError
+        after_last_session = \
+            JP_EQUITIES.calendar.last_session + pd.Timedelta(days=20)
+
+        with self.assertRaises(ValueError) as ve:
+            JP_EQUITIES.roll_forward(after_last_session)
+
+        self.assertEqual(
+            str(ve.exception),
+            "Date {} was past the last session for domain "
+            "EquityCalendarDomain('JP', 'XTKS'). The last session for "
+            "this domain is {}.".format(
+                after_last_session.date(),
+                JP_EQUITIES.calendar.last_session.date(),
+            )
+        )
+
+        # test that a roll_forward works with an EquitySessionDomain,
+        # not just calendar domains
+        sessions = pd.DatetimeIndex(
+            ['2000-01-01',
+             '2000-02-01',
+             '2000-04-01',
+             '2000-06-01'],
+            tz='UTC'
+        )
+
+        session_domain = EquitySessionDomain(
+            sessions, CountryCode.UNITED_STATES
+        )
+
+        self.assertEqual(
+            session_domain.roll_forward('2000-02-01'),
+            pd.Timestamp('2000-02-01', tz='UTC'),
+        )
+
+        self.assertEqual(
+            session_domain.roll_forward('2000-02-02'),
+            pd.Timestamp('2000-04-01', tz='UTC'),
+        )

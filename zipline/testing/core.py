@@ -1,7 +1,6 @@
 from abc import ABCMeta, abstractmethod, abstractproperty
 from contextlib import contextmanager
 import gzip
-from inspect import getargspec
 from itertools import (
     combinations,
     count,
@@ -30,7 +29,7 @@ from trading_calendars import get_calendar
 
 from zipline.assets import AssetFinder, AssetDBWriter
 from zipline.assets.synthetic import make_simple_equity_info
-from zipline.utils.compat import wraps
+from zipline.utils.compat import getargspec, wraps
 from zipline.data.data_portal import DataPortal
 from zipline.data.loader import get_benchmark_filename, INDEX_MAPPING
 from zipline.data.minute_bars import (
@@ -42,7 +41,6 @@ from zipline.data.bcolz_daily_bars import (
     BcolzDailyBarReader,
     BcolzDailyBarWriter,
 )
-from zipline.data.adjustments import SQLiteAdjustmentWriter
 from zipline.finance.blotter import SimulationBlotter
 from zipline.finance.order import ORDER_STATUS
 from zipline.lib.labelarray import LabelArray
@@ -981,8 +979,24 @@ def subtest(iterator, *_names):
 
 
 class MockDailyBarReader(object):
+    def __init__(self, dates):
+        self.sessions = pd.DatetimeIndex(dates)
+
+    def load_raw_arrays(self, columns, start, stop, sids):
+        dates = self.sessions
+        if start < dates[0]:
+            raise ValueError('start date is out of bounds for this reader')
+        if stop > dates[-1]:
+            raise ValueError('stop date is out of bounds for this reader')
+
+        output_dates = dates[(dates >= start) & (dates <= stop)]
+        return [
+            np.full((len(output_dates), len(sids)), 100.0)
+            for _ in columns
+        ]
+
     def get_value(self, col, sid, dt):
-        return 100
+        return 100.0
 
 
 def create_mock_adjustment_data(splits=None, dividends=None, mergers=None):
@@ -1002,15 +1016,6 @@ def create_mock_adjustment_data(splits=None, dividends=None, mergers=None):
         dividends = pd.DataFrame(dividends)
 
     return splits, mergers, dividends
-
-
-def create_mock_adjustments(tempdir, days, splits=None, dividends=None,
-                            mergers=None):
-    path = tempdir.getpath("test_adjustments.db")
-    SQLiteAdjustmentWriter(path, MockDailyBarReader(), days).write(
-        *create_mock_adjustment_data(splits, dividends, mergers)
-    )
-    return path
 
 
 def assert_timestamp_equal(left, right, compare_nat_equal=True, msg=""):
@@ -1768,3 +1773,27 @@ def create_simple_domain(start, end, country_code):
     """Create a new pipeline domain with a simple date_range index.
     """
     return EquitySessionDomain(pd.date_range(start, end), country_code)
+
+
+def write_hdf5_daily_bars(writer,
+                          asset_finder,
+                          country_codes,
+                          generate_data):
+    """Write an HDF5 file of pricing data using an HDF5DailyBarWriter.
+    """
+    asset_finder = asset_finder
+    for country_code in country_codes:
+        sids = asset_finder.equities_sids_for_country_code(country_code)
+        data_generator = generate_data(country_code=country_code, sids=sids)
+        writer.write_from_sid_df_pairs(country_code, data_generator)
+
+
+def exchange_info_for_domains(domains):
+    """
+    Build an exchange_info suitable for passing to an AssetFinder from a list
+    of EquityCalendarDomain.
+    """
+    return pd.DataFrame.from_records([
+        {'exchange': domain.calendar.name, 'country_code': domain.country_code}
+        for domain in domains
+    ])

@@ -2087,6 +2087,9 @@ class BlazeToPipelineTestCase(WithAssetFinder, ZiplineTestCase):
                 compute_fn=op.itemgetter(-1),
             )
 
+    test_checkpoints_dates = pd.date_range('2013-12-31', '2014-01-04')
+    test_checkpoints_expected_view_date = pd.Timestamp('2014-01-03')
+
     def _test_checkpoints_macro(self, checkpoints, ffilled_value=-1.0):
         """Simple checkpoints test that accepts a checkpoints dataframe and
         the expected value for 2014-01-03 for macro datasets.
@@ -2101,10 +2104,7 @@ class BlazeToPipelineTestCase(WithAssetFinder, ZiplineTestCase):
             The value to be read on the third, if not provided, it will be the
             value in the base data that will be naturally ffilled there.
         """
-        dates = pd.Index([
-            pd.Timestamp('2014-01-01'),
-            pd.Timestamp('2014-01-04'),
-        ])
+        dates = self.test_checkpoints_dates[[1, -1]]
         asof_dates = dates - pd.Timedelta(days=1)
         timestamps = asof_dates + pd.Timedelta(hours=23)
         baseline = pd.DataFrame({
@@ -2114,9 +2114,11 @@ class BlazeToPipelineTestCase(WithAssetFinder, ZiplineTestCase):
         })
 
         nassets = len(simple_asset_info)
-        expected_views = keymap(partial(pd.Timestamp, tz='UTC'), {
-            '2014-01-03': np.array([[ffilled_value]]),
-            '2014-01-04': np.array([[1.0]]),
+        expected_views = keymap(lambda t: t.tz_localize('UTC'), {
+            self.test_checkpoints_expected_view_date: (
+                np.array([[ffilled_value]])
+            ),
+            self.test_checkpoints_dates[-1]: np.array([[1.0]]),
         })
 
         with tmp_asset_finder(equities=simple_asset_info) as finder:
@@ -2151,7 +2153,10 @@ class BlazeToPipelineTestCase(WithAssetFinder, ZiplineTestCase):
     def test_checkpoints_macro(self, checkpoints_ts_fuzz_minutes):
         ffilled_value = 0.0
 
-        checkpoints_ts = pd.Timestamp('2014-01-02')
+        checkpoints_ts = (
+            self.test_checkpoints_expected_view_date -
+            pd.Timedelta(days=1)
+        )
         checkpoints = pd.DataFrame({
             'value': [ffilled_value],
             'asof_date': checkpoints_ts,
@@ -2178,20 +2183,35 @@ class BlazeToPipelineTestCase(WithAssetFinder, ZiplineTestCase):
     def test_checkpoints_out_of_bounds_macro(self):
         # provide two checkpoints, one before the data in the base table
         # and one after, these should not affect the value on the third
-        asof_dates = pd.to_datetime(['2013-12-30', '2014-01-04'])
-        checkpoints = pd.DataFrame({
+        asof_dates = self.test_checkpoints_dates[[0, -1]]
+        out_of_bounds = pd.DataFrame({
             'value': [-2, 2],
             'asof_date': asof_dates,
             'timestamp': asof_dates + pd.Timedelta(hours=23),
         })
 
-        self._test_checkpoints_macro(checkpoints)
+        # Add a single checkpoint on the query day with a timestamp of exactly
+        # the data query time. This should not get pulled to overwrite the
+        # expected data on the 3rd.
+        exact_query_time = pd.DataFrame({
+            'value': [1],
+            'asof_date': [
+                self.test_checkpoints_expected_view_date -
+                pd.Timedelta(days=1)
+            ],
+            'timestamp': [self.test_checkpoints_expected_view_date],
+        })
+
+        self._test_checkpoints_macro(
+            pd.concat([out_of_bounds, exact_query_time]),
+        )
 
     def _test_checkpoints(self, checkpoints, ffilled_values=None):
         """Simple checkpoints test that accepts a checkpoints dataframe and
         the expected value for 2014-01-03.
 
-        The underlying data has value -1.0 on 2014-01-01 and 1.0 on 2014-01-04.
+        The underlying data has value -(sid + 1) on 2014-01-01 and sid + 1 on
+        2014-01-04.
 
         Parameters
         ----------
@@ -2203,14 +2223,14 @@ class BlazeToPipelineTestCase(WithAssetFinder, ZiplineTestCase):
         """
         nassets = len(simple_asset_info)
 
-        dates = pd.to_datetime(['2013-12-31', '2014-01-04'])
+        dates = self.test_checkpoints_dates[[1, -1]]
 
         asof_dates = dates - pd.Timedelta(days=1)
         asof_dates_repeated = np.tile(asof_dates, nassets)
         timestamps = asof_dates + pd.Timedelta(hours=23)
         timestamps_repeated = np.tile(timestamps, nassets)
 
-        values = np.arange(nassets) + 1
+        values = simple_asset_info.index.values + 1
         values = np.hstack((values[::-1], values))
         baseline = pd.DataFrame({
             'sid': np.tile(simple_asset_info.index, 2),
@@ -2225,8 +2245,8 @@ class BlazeToPipelineTestCase(WithAssetFinder, ZiplineTestCase):
         updated_values = baseline.value.iloc[nassets:]
 
         expected_views = keymap(partial(pd.Timestamp, tz='UTC'), {
-            '2014-01-03': [ffilled_values],
-            '2014-01-04': [updated_values],
+            self.test_checkpoints_expected_view_date: [ffilled_values],
+            self.test_checkpoints_dates[-1]: [updated_values],
         })
 
         with tmp_asset_finder(equities=simple_asset_info) as finder:
@@ -2274,7 +2294,6 @@ class BlazeToPipelineTestCase(WithAssetFinder, ZiplineTestCase):
                 pd.Timedelta(days=1, minutes=checkpoints_ts_fuzz_minutes)
             ),
         })
-
         self._test_checkpoints(checkpoints, ffilled_values)
 
     def test_empty_checkpoints(self):
@@ -2291,18 +2310,31 @@ class BlazeToPipelineTestCase(WithAssetFinder, ZiplineTestCase):
         nassets = len(simple_asset_info)
         # provide two sets of checkpoints, one before the data in the base
         # table and one after, these should not affect the value on the third
-        asof_dates = pd.to_datetime(['2013-12-30', '2014-01-04'])
+        asof_dates = self.test_checkpoints_dates[[0, -1]]
         asof_dates_repeated = np.tile(asof_dates, nassets)
         ffilled_values = (np.arange(nassets) + 2) * 10
         ffilled_values = np.hstack((ffilled_values[::-1], ffilled_values))
-        checkpoints = pd.DataFrame({
+        out_of_bounds = pd.DataFrame({
             'sid': np.tile(simple_asset_info.index, 2),
             'value': ffilled_values,
             'asof_date': asof_dates_repeated,
             'timestamp': asof_dates_repeated + pd.Timedelta(hours=23),
         })
 
-        self._test_checkpoints(checkpoints)
+        # Add a single checkpoint on the query day with a timestamp of exactly
+        # the data query time. This should not get pulled to overwrite the
+        # expected data on the 3rd.
+        exact_query_time = pd.DataFrame({
+            'sid': simple_asset_info.index,
+            'value': simple_asset_info.index + 1,
+            'asof_date': (
+                self.test_checkpoints_expected_view_date -
+                pd.Timedelta(days=1)
+            ),
+            'timestamp': self.test_checkpoints_expected_view_date,
+        })
+
+        self._test_checkpoints(pd.concat([out_of_bounds, exact_query_time]))
 
     def test_id_take_last_in_group_sorted(self):
         """

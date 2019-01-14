@@ -8,11 +8,17 @@ Logbook==0.12.5
 
 # Scientific Libraries
 
-pytz==2016.4
+pytz==2018.5
 numpy==1.11.3
 
 # for pandas-datareader
 requests-file==1.4.1
+
+# for requests
+certifi==2018.8.24
+chardet==3.0.4
+idna==2.7
+urllib3==1.23
 
 # scipy and pandas are required for statsmodels,
 # statsmodels in turn is required for some pandas packages
@@ -27,7 +33,7 @@ python-dateutil==2.4.2
 six==1.10.0
 
 # For fetching remote data
-requests==2.9.1
+requests==2.20.1
 
 Cython==0.25.2
 
@@ -65,7 +71,7 @@ multipledispatch==0.6.0
 MarkupSafe==0.23
 Mako==1.0.1
 # Asset writer and finder
-sqlalchemy==1.0.8
+sqlalchemy==1.1.18
 # For asset db management
 alembic==0.7.7
 
@@ -82,10 +88,12 @@ empyrical==0.5.0
 tables==3.4.3
 
 # For trading calendars
-trading-calendars==1.0.1
+trading-calendars==1.6.1
 
 # Interface definitions.
-python-interface==1.4.0
+python-interface==1.5.1
+funcsigs==1.0.2
+typing==3.6.2
 
 # Country Codes
 iso3166==0.9

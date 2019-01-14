@@ -124,7 +124,7 @@ class BundleCoreTestCase(WithInstanceTmpDir,
         assert_true(called[0])
 
     def test_ingest(self):
-        calendar = get_calendar('NYSE')
+        calendar = get_calendar('XNYS')
         sessions = calendar.sessions_in_range(self.START_DATE, self.END_DATE)
         minutes = calendar.minutes_for_sessions_in_range(
             self.START_DATE, self.END_DATE,
@@ -199,7 +199,7 @@ class BundleCoreTestCase(WithInstanceTmpDir,
         for actual_column, colname in zip(actual, columns):
             assert_equal(
                 actual_column,
-                expected_bar_values_2d(minutes, equities, colname),
+                expected_bar_values_2d(minutes, sids, equities, colname),
                 msg=colname,
             )
 
@@ -212,7 +212,7 @@ class BundleCoreTestCase(WithInstanceTmpDir,
         for actual_column, colname in zip(actual, columns):
             assert_equal(
                 actual_column,
-                expected_bar_values_2d(sessions, equities, colname),
+                expected_bar_values_2d(sessions, sids, equities, colname),
                 msg=colname,
             )
         adjustments_for_cols = bundle.adjustment_reader.load_adjustments(

@@ -60,7 +60,7 @@ class DataPortalTestBase(WithDataPortal,
         return pd.DataFrame({
             'root_symbol': ['BAR', 'BUZ'],
             'root_symbol_id': [1, 2],
-            'exchange': ['CME', 'CME'],
+            'exchange': ['CMES', 'CMES'],
         })
 
     @classmethod
@@ -77,7 +77,7 @@ class DataPortalTestBase(WithDataPortal,
             'expiration_date': [cls.END_DATE, cls.END_DATE],
             'tick_size': [0.01, 0.0001],
             'multiplier': [500, 50000],
-            'exchange': ['CME', 'CME'],
+            'exchange': ['CMES', 'CMES'],
         })
 
     @classmethod
@@ -406,7 +406,7 @@ class DataPortalTestBase(WithDataPortal,
         day = calendar.day
         dividend_date = self.trading_days[2]
 
-        prev_day_price = 1.005
+        prev_day_price = 1.006
         dividend_amount = 0.5  # see self.make_dividends_data
         ratio = 1.0 - dividend_amount / prev_day_price
 
@@ -541,10 +541,10 @@ class DataPortalTestBase(WithDataPortal,
 
         # Equity prices should be floored to three decimal places.
         expected_equity_values = {
-            'open': 1.005,
-            'high': 1.005,
+            'open': 1.006,
+            'high': 1.006,
             'low': 1.005,
-            'close': 1.005,
+            'close': 1.006,
             'volume': expected_equity_volume,
         }
         # Futures prices should be rounded to four decimal places.

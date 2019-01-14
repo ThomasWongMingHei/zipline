@@ -5,6 +5,7 @@ import warnings
 
 from contextlib2 import ExitStack
 from logbook import NullHandler, Logger
+import numpy as np
 import pandas as pd
 from six import with_metaclass, iteritems, itervalues
 import responses
@@ -26,13 +27,14 @@ from zipline.pipeline.domain import GENERIC, US_EQUITIES
 from zipline.pipeline.loaders import USEquityPricingLoader
 from zipline.pipeline.loaders.testing import make_seeded_random_loader
 from zipline.protocol import BarData
-from zipline.utils.paths import ensure_directory
+from zipline.utils.paths import ensure_directory, ensure_directory_containing
 from .core import (
     create_daily_bar_data,
     create_minute_bar_data,
     make_simple_equity_info,
     tmp_asset_finder,
     tmp_dir,
+    write_hdf5_daily_bars,
 )
 from .debug import debug_mro_failure
 from ..data.adjustments import (
@@ -483,6 +485,7 @@ class WithAssetFinder(WithDefaultDateBounds):
         return list(cls.assets_by_calendar)
 
 
+# TODO_SS: The API here doesn't make sense in a multi-country test scenario.
 class WithTradingCalendars(object):
     """
     ZiplineTestCase mixin providing cls.trading_calendar,
@@ -831,10 +834,7 @@ class WithEquityDailyBarData(WithAssetFinder, WithTradingCalendars):
         if cls.EQUITY_DAILY_BAR_SOURCE_FROM_MINUTE:
             return cls._make_equity_daily_bar_from_minute()
         else:
-            return create_daily_bar_data(
-                cls.equity_daily_bar_days,
-                cls.asset_finder.equities_sids,
-            )
+            return create_daily_bar_data(cls.equity_daily_bar_days, sids)
 
     @classmethod
     def init_class_fixtures(cls):
@@ -1169,11 +1169,62 @@ def _trading_days_for_minute_bars(calendar,
     return calendar.sessions_in_range(first_session, end_date)
 
 
-class WithHDF5EquityMultiCountryDailyBarReader(WithEquityDailyBarData,
-                                               WithTmpDir):
-
+# TODO_SS: This currently doesn't define any relationship between country_code
+#          and calendar, which would be useful downstream.
+class WithWriteHDF5DailyBars(WithEquityDailyBarData,
+                             WithTmpDir):
     """
-    ZiplineTestCase mixin providing cls.hdf5_daily_bar_path and
+    Fixture class defining the capability of writing HDF5 daily bars to disk.
+
+    Uses cls.make_equity_daily_bar_data (inherited from WithEquityDailyBarData)
+    to determine the data to write.
+
+    Methods
+    -------
+    write_hdf5_daily_bars(cls, path, country_codes)
+        Creates an HDF5 file on disk and populates it with pricing data.
+
+    Attributes
+    ----------
+    HDF5_DAILY_BAR_CHUNK_SIZE
+    """
+    HDF5_DAILY_BAR_CHUNK_SIZE = 30
+
+    @classmethod
+    def write_hdf5_daily_bars(cls, path, country_codes):
+        """
+        Write HDF5 pricing data using an HDF5DailyBarWriter.
+
+        Parameters
+        ----------
+        path : str
+            Location (relative to cls.tmpdir) at which to write data.
+        country_codes : list[str]
+            List of country codes to write.
+
+        Returns
+        -------
+        written : h5py.File
+             A read-only h5py.File pointing at the written data. The returned
+             file is registered to be closed automatically during class
+             teardown.
+        """
+        ensure_directory_containing(path)
+        writer = HDF5DailyBarWriter(path, cls.HDF5_DAILY_BAR_CHUNK_SIZE)
+        write_hdf5_daily_bars(
+            writer,
+            cls.asset_finder,
+            country_codes,
+            cls.make_equity_daily_bar_data,
+        )
+
+        # Open the file and mark it for closure during teardown.
+        return cls.enter_class_context(writer.h5_file(mode='r'))
+
+
+class WithHDF5EquityMultiCountryDailyBarReader(WithWriteHDF5DailyBars):
+    """
+    Fixture providing cls.hdf5_daily_bar_path and
     cls.hdf5_equity_daily_bar_reader class level fixtures.
 
     After init_class_fixtures has been called:
@@ -1182,6 +1233,7 @@ class WithHDF5EquityMultiCountryDailyBarReader(WithEquityDailyBarData,
     - The file at `cls.hdf5_daily_bar_path` is populated with data returned
       from `cls.make_equity_daily_bar_data`. By default this calls
       :func:`zipline.pipeline.loaders.synthetic.make_equity_daily_bar_data`.
+
     - `cls.hdf5_equity_daily_bar_reader` is a daily bar reader pointing
       to the file that was just written to.
 
@@ -1206,7 +1258,6 @@ class WithHDF5EquityMultiCountryDailyBarReader(WithEquityDailyBarData,
     """
     HDF5_DAILY_BAR_PATH = 'daily_equity_pricing.h5'
     HDF5_DAILY_BAR_COUNTRY_CODES = alias('EQUITY_DAILY_BAR_COUNTRY_CODES')
-    HDF5_DAILY_BAR_DATE_CHUNK_SIZE = 30
 
     @classmethod
     def make_hdf5_daily_bar_path(cls):
@@ -1219,26 +1270,9 @@ class WithHDF5EquityMultiCountryDailyBarReader(WithEquityDailyBarData,
             cls,
         ).init_class_fixtures()
 
-        cls.hdf5_daily_bar_path = p = cls.make_hdf5_daily_bar_path()
+        cls.hdf5_daily_bar_path = path = cls.make_hdf5_daily_bar_path()
 
-        chunksize = cls.HDF5_DAILY_BAR_DATE_CHUNK_SIZE
-        writer = HDF5DailyBarWriter(p, chunksize)
-
-        asset_finder = cls.asset_finder
-        for country_code in cls.HDF5_DAILY_BAR_COUNTRY_CODES:
-            sids = asset_finder.equities_sids_for_country_code(country_code)
-
-            writer.write_from_sid_df_pairs(
-                country_code,
-                cls.make_equity_daily_bar_data(
-                    country_code=country_code,
-                    sids=sids,
-                ),
-            )
-
-        # Use the h5 file through a class level context manager, so the
-        # file is properly closed when the test case exits.
-        f = cls.enter_class_context(writer.h5_file(mode='r'))
+        f = cls.write_hdf5_daily_bars(path, cls.HDF5_DAILY_BAR_COUNTRY_CODES)
 
         cls.single_country_hdf5_equity_daily_bar_readers = {
             country_code: HDF5DailyBarReader.from_file(f, country_code)
@@ -1615,7 +1649,6 @@ class WithAdjustmentReader(WithBcolzEquityDailyBarReader):
         return SQLiteAdjustmentWriter(
             conn,
             cls.make_adjustment_writer_equity_daily_bar_reader(),
-            cls.equity_daily_bar_days,
         )
 
     @classmethod
@@ -1976,3 +2009,11 @@ class WithWerror(object):
 
 
 register_calendar_alias("TEST", "NYSE")
+
+
+class WithSeededRandomState(object):
+    RANDOM_SEED = np.array(list('lmao'), dtype='S1').view('i4').item()
+
+    def init_instance_fixtures(self):
+        super(WithSeededRandomState, self).init_instance_fixtures()
+        self.rand = np.random.RandomState(self.RANDOM_SEED)

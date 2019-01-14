@@ -1,71 +1,88 @@
 """
-Reader and writer for the HDF5 daily pricing file format.
-
+HDF5 Pricing File Format
+------------------------
 At the top level, the file is keyed by country (to support regional
 files containing multiple countries).
 
-###
-
 Within each country, there are 3 subgroups:
 
-1) /data
-     /open
-     /high
-     /low
-     /close
-     /volume
-
+``/data``
+^^^^^^^^^
 Each field (OHLCV) is stored in a dataset as a 2D array, with a row per
 sid and a column per session. This differs from the more standard
 orientation of dates x sids, because it allows each compressed block to
 contain contiguous values for the same sid, which allows for better
 compression.
 
-2) /index
-     /sid
-     /day
+.. code-block:: none
 
+   /data
+     /open
+     /high
+     /low
+     /close
+     /volume
+
+``/index``
+^^^^^^^^^^
 Contains two datasets, the index of sids (aligned to the rows of the
 OHLCV 2D arrays) and index of sessions (aligned to the columns of the
 OHLCV 2D arrays) to use for lookups.
 
-3) /lifetimes
-     /start_date
-     /end_date
+.. code-block:: none
 
+   /index
+     /sid
+     /day
+
+``/lifetimes``
+^^^^^^^^^^^^^^
 Contains two datasets, start_date and end_date, defining the lifetime
 for each asset, aligned to the sids index.
 
-###
+.. code-block:: none
 
-Sample layout of the full file with multiple countries:
+   /lifetimes
+     /start_date
+     /end_date
 
-    /US
-      /data
-        /open
-        /high
-        /low
-        /close
-        /volume
-      /index
-        /sid
-        /day
-      /lifetimes
-        /start_date
-        /end_date
-    /CA
-      /data
-        /open
-        /high
-        /low
-        /close
-        /volume
-      /index
-        /sid
-        /day
-      /lifetimes
-        /start_date
-        /end_date
+Example
+^^^^^^^
+Sample layout of the full file with multiple countries.
+
+.. code-block:: none
+
+   |- /US
+   |  |- /data
+   |  |  |- /open
+   |  |  |- /high
+   |  |  |- /low
+   |  |  |- /close
+   |  |  |- /volume
+   |  |
+   |  |- /index
+   |  |  |- /sid
+   |  |  |- /day
+   |  |
+   |  |- /lifetimes
+   |     |- /start_date
+   |     |- /end_date
+   |
+   |- /CA
+      |- /data
+      |  |- /open
+      |  |- /high
+      |  |- /low
+      |  |- /close
+      |  |- /volume
+      |
+      |- /index
+      |  |- /sid
+      |  |- /day
+      |
+      |- /lifetimes
+         |- /start_date
+         |- /end_date
 """
 
 
@@ -75,16 +92,23 @@ import h5py
 import logbook
 import numpy as np
 import pandas as pd
-from six import iteritems
+from six import iteritems, raise_from, viewkeys
 from six.moves import reduce
 
-from zipline.data.bar_reader import NoDataBeforeDate, NoDataAfterDate
+from zipline.data.bar_reader import (
+    NoDataAfterDate,
+    NoDataBeforeDate,
+    NoDataForSid,
+    NoDataOnDate,
+)
 from zipline.data.session_bars import SessionBarReader
 from zipline.utils.memoize import lazyval
 from zipline.utils.pandas_utils import check_indexes_all_same
 
 
 log = logbook.Logger('HDF5DailyBars')
+
+VERSION = 0
 
 
 DATA = 'data'
@@ -119,12 +143,12 @@ DEFAULT_SCALING_FACTORS = {
 }
 
 
-def coerce_to_uint32(a, field, scaling_factor):
+def coerce_to_uint32(a, scaling_factor):
     """
     Returns a copy of the array as uint32, applying a scaling factor to
     maintain precision if supplied.
     """
-    return (a * scaling_factor).astype('uint32')
+    return (a * scaling_factor).round().astype('uint32')
 
 
 def days_and_sids_for_frames(frames):
@@ -150,6 +174,10 @@ def days_and_sids_for_frames(frames):
         If the dataframes passed are not all indexed by the same days
         and sids.
     """
+    if not frames:
+        days = np.array([], dtype='datetime64[ns]')
+        sids = np.array([], dtype='int64')
+        return days, sids
 
     # Ensure the indices and columns all match.
     check_indexes_all_same(
@@ -213,6 +241,9 @@ class HDF5DailyBarWriter(object):
             scaling_factors = DEFAULT_SCALING_FACTORS
 
         with self.h5_file(mode='a') as h5_file:
+            # ensure that the file version has been written
+            h5_file.attrs['version'] = VERSION
+
             country_group = h5_file.create_group(country_code)
 
             data_group = country_group.create_group(DATA)
@@ -242,6 +273,12 @@ class HDF5DailyBarWriter(object):
             lifetimes_group.create_dataset(START_DATE, data=start_date_ixs)
             lifetimes_group.create_dataset(END_DATE, data=end_date_ixs)
 
+            if len(sids):
+                chunks = (len(sids), min(self._date_chunk_size, len(days)))
+            else:
+                # h5py crashes if we provide chunks for empty data.
+                chunks = None
+
             for field in FIELDS:
                 frame = frames[field]
 
@@ -251,7 +288,6 @@ class HDF5DailyBarWriter(object):
 
                 data = coerce_to_uint32(
                     frame.T.fillna(0).values,
-                    field,
                     scaling_factors[field],
                 )
 
@@ -260,10 +296,7 @@ class HDF5DailyBarWriter(object):
                     compression='lzf',
                     shuffle=True,
                     data=data,
-                    chunks=(
-                        len(sids),
-                        min(self._date_chunk_size, len(days))
-                    ),
+                    chunks=chunks,
                 )
 
                 dataset.attrs[SCALING_FACTOR] = scaling_factors[field]
@@ -294,10 +327,27 @@ class HDF5DailyBarWriter(object):
             float values. Default is None, in which case
             DEFAULT_SCALING_FACTORS is used.
         """
-        ohlcv_frame = pd.concat([df for sid, df in data])
+        data = list(data)
+        if not data:
+            empty_frame = pd.DataFrame(
+                data=None,
+                index=np.array([], dtype='datetime64[ns]'),
+                columns=np.array([], dtype='int64'),
+            )
+            return self.write(
+                country_code,
+                {f: empty_frame.copy() for f in FIELDS},
+                scaling_factors,
+            )
+
+        sids, frames = zip(*data)
+        ohlcv_frame = pd.concat(frames)
+
+        # Repeat each sid for each row in its corresponding frame.
+        sid_ix = np.repeat(sids, [len(f) for f in frames])
 
         # Add id to the index, so the frame is indexed by (date, id).
-        ohlcv_frame.set_index('id', append=True, inplace=True)
+        ohlcv_frame.set_index(sid_ix, append=True, inplace=True)
 
         frames = {
             field: ohlcv_frame[field].unstack()
@@ -327,9 +377,16 @@ def compute_asset_lifetimes(frames):
     is_null_matrix = np.logical_and.reduce(
         [frames[field].isnull().values for field in FIELDS],
     )
+    if not is_null_matrix.size:
+        empty = np.array([], dtype='int64')
+        return empty, empty.copy()
 
+    # Offset of the first null from the start of the input.
     start_date_ixs = is_null_matrix.argmin(axis=0)
-    end_date_ixs = is_null_matrix[::-1].argmin(axis=0)
+    # Offset of the last null from the **end** of the input.
+    end_offsets = is_null_matrix[::-1].argmin(axis=0)
+    # Offset of the last null from the start of the input
+    end_date_ixs = is_null_matrix.shape[0] - end_offsets - 1
 
     return start_date_ixs, end_date_ixs
 
@@ -366,6 +423,8 @@ class HDF5DailyBarReader(SessionBarReader):
     @classmethod
     def from_file(cls, h5_file, country_code):
         """
+        Construct from an h5py.File and a country code.
+
         Parameters
         ----------
         h5_file : h5py.File
@@ -373,11 +432,21 @@ class HDF5DailyBarReader(SessionBarReader):
         country_code : str
             The ISO 3166 alpha-2 country code for the country to read.
         """
+        if h5_file.attrs['version'] != VERSION:
+            raise ValueError(
+                'mismatched version: file is of version %s, expected %s' % (
+                    h5_file.attrs['version'],
+                    VERSION,
+                ),
+            )
+
         return cls(h5_file[country_code])
 
     @classmethod
     def from_path(cls, path, country_code):
         """
+        Construct from a file path and a country code.
+
         Parameters
         ----------
         path : str
@@ -414,33 +483,72 @@ class HDF5DailyBarReader(SessionBarReader):
             (minutes in range, sids) with a dtype of float64, containing the
             values for the respective field over start and end dt range.
         """
+        self._validate_timestamp(start_date)
+        self._validate_timestamp(end_date)
+
         start = start_date.asm8
         end = end_date.asm8
-
-        sid_selector = self.sids.searchsorted(assets)
         date_slice = self._compute_date_range_slice(start, end)
+        n_dates = date_slice.stop - date_slice.start
 
-        nrows = date_slice.stop - date_slice.start
-        ncols = len(assets)
+        # Create a buffer into which we'll read data from the h5 file.
+        # Allocate an extra row of space that will always contain null values.
+        # We'll use that space to provide "data" for entries in ``assets`` that
+        # are unknown to us.
+        full_buf = np.zeros((len(self.sids) + 1, n_dates), dtype=np.uint32)
+        # We'll only read values into this portion of the read buf.
+        mutable_buf = full_buf[:-1]
 
-        buf = np.zeros((ncols, nrows), dtype=np.uint32)
+        # Indexer that converts an array aligned to self.sids (which is what we
+        # pull from the h5 file) into an array aligned to ``assets``.
+        #
+        # Unknown assets will have an index of -1, which means they'll always
+        # pull from the last row of the read buffer. We allocated an extra
+        # empty row above so that these lookups will cause us to fill our
+        # output buffer with "null" values.
+        sid_selector = self._make_sid_selector(assets)
 
         out = []
         for column in columns:
-            # Zero the buffer to prepare it to receive new data.
-            buf.fill(0)
+            # Zero the buffer to prepare to receive new data.
+            mutable_buf.fill(0)
 
             dataset = self._country_group[DATA][column]
 
-            dataset.read_direct(buf, np.s_[:, date_slice.start:date_slice.stop])  # noqa
-
-            out.append(
-                self._postprocessors[column](
-                    buf[sid_selector].T
-                )
+            # Fill the mutable portion of our buffer with data from the file.
+            dataset.read_direct(
+                mutable_buf,
+                np.s_[:, date_slice],
             )
 
+            # Select data from the **full buffer**. Unknown assets will pull
+            # from the last row, which is always empty.
+            out.append(self._postprocessors[column](full_buf[sid_selector].T))
+
         return out
+
+    def _make_sid_selector(self, assets):
+        """
+        Build an indexer mapping ``self.sids`` to ``assets``.
+
+        Parameters
+        ----------
+        assets : list[int]
+            List of assets requested by a caller of ``load_raw_arrays``.
+
+        Returns
+        -------
+        index : np.array[int64]
+            Index array containing the index in ``self.sids`` for each location
+            in ``assets``. Entries in ``assets`` for which we don't have a sid
+            will contain -1. It is caller's responsibility to handle these
+            values correctly.
+        """
+        assets = np.array(assets)
+        sid_selector = self.sids.searchsorted(assets)
+        unknown = np.in1d(assets, self.sids, invert=True)
+        sid_selector[unknown] = -1
+        return sid_selector
 
     def _compute_date_range_slice(self, start_date, end_date):
         # Get the index of the start of dates for ``start_date``.
@@ -451,14 +559,40 @@ class HDF5DailyBarReader(SessionBarReader):
 
         return slice(start_ix, end_ix)
 
+    def _validate_assets(self, assets):
+        """Validate that asset identifiers are contained in the daily bars.
+
+        Parameters
+        ----------
+        assets : array-like[int]
+           The asset identifiers to validate.
+
+        Raises
+        ------
+        NoDataForSid
+            If one or more of the provided asset identifiers are not
+            contained in the daily bars.
+        """
+        missing_sids = np.setdiff1d(assets, self.sids)
+
+        if len(missing_sids):
+            raise NoDataForSid(
+                'Assets not contained in daily pricing file: {}'.format(
+                    missing_sids
+                )
+            )
+
+    def _validate_timestamp(self, ts):
+        if ts.asm8 not in self.dates:
+            raise NoDataOnDate(ts)
+
     @lazyval
     def dates(self):
         return self._country_group[INDEX][DAY][:].astype('datetime64[ns]')
 
     @lazyval
     def sids(self):
-        sids = self._country_group[INDEX][SID][:]
-        return sids.astype(int)
+        return self._country_group[INDEX][SID][:].astype('int64', copy=False)
 
     @lazyval
     def asset_start_dates(self):
@@ -535,6 +669,9 @@ class HDF5DailyBarReader(SessionBarReader):
             If the given dt is not a valid market minute (in minute mode) or
             session (in daily mode) according to this reader's tradingcalendar.
         """
+        self._validate_assets([sid])
+        self._validate_timestamp(dt)
+
         sid_ix = self.sids.searchsorted(sid)
         dt_ix = self.dates.searchsorted(dt.asm8)
 
@@ -550,7 +687,7 @@ class HDF5DailyBarReader(SessionBarReader):
             if dt.asm8 < self.asset_start_dates[sid_ix]:
                 raise NoDataBeforeDate()
 
-            if dt.asm8 > self.asset_start_dates[sid_ix]:
+            if dt.asm8 > self.asset_end_dates[sid_ix]:
                 raise NoDataAfterDate()
 
         return value
@@ -604,19 +741,53 @@ class MultiCountryDailyBarReader(SessionBarReader):
             for country_code, reader in iteritems(readers)
         ])
 
+    @classmethod
+    def from_file(cls, h5_file):
+        """
+        Construct from an h5py.File.
+
+        Parameters
+        ----------
+        h5_file : h5py.File
+            An HDF5 daily pricing file.
+        """
+        return cls({
+            country: HDF5DailyBarReader.from_file(h5_file, country)
+            for country in h5_file.keys()
+        })
+
+    @classmethod
+    def from_path(cls, path):
+        """
+        Construct from a file path.
+
+        Parameters
+        ----------
+        path : str
+            Path to an HDF5 daily pricing file.
+        """
+        return cls.from_file(h5py.File(path))
+
+    @property
+    def countries(self):
+        """A set-like object of the country codes supplied by this reader.
+        """
+        return viewkeys(self._readers)
+
     def _country_code_for_assets(self, assets):
-        country_codes = self._country_map[assets]
+        country_codes = self._country_map.get(assets)
 
-        if country_codes.isnull().any():
-            raise ValueError(
-                'Assets not contained in daily pricing file: {}'.format(
-                    list(country_codes[country_codes.isnull()].index)
-                )
-            )
+        # In some versions of pandas (observed in 0.22), Series.get()
+        # returns None if none of the labels are in the index.
+        if country_codes is not None:
+            unique_country_codes = country_codes.dropna().unique()
+            num_countries = len(unique_country_codes)
+        else:
+            num_countries = 0
 
-        unique_country_codes = country_codes.unique()
-
-        if len(unique_country_codes) > 1:
+        if num_countries == 0:
+            raise ValueError('At least one valid asset id is required.')
+        elif num_countries > 1:
             raise NotImplementedError(
                 (
                     'Assets were requested from multiple countries ({}),'
@@ -706,7 +877,7 @@ class MultiCountryDailyBarReader(SessionBarReader):
         return pd.to_datetime(
             reduce(
                 np.union1d,
-                (reader.dates for reader in self.readers.values()),
+                (reader.dates for reader in self._readers.values()),
             ),
             utc=True,
         )
@@ -735,8 +906,18 @@ class MultiCountryDailyBarReader(SessionBarReader):
         NoDataOnDate
             If the given dt is not a valid market minute (in minute mode) or
             session (in daily mode) according to this reader's tradingcalendar.
+        NoDataForSid
+            If the given sid is not valid.
         """
-        country_code = self._country_code_for_assets([sid])
+        try:
+            country_code = self._country_code_for_assets([sid])
+        except ValueError as exc:
+            raise_from(
+                NoDataForSid(
+                    'Asset not contained in daily pricing file: {}'.format(sid)
+                ),
+                exc
+            )
         return self._readers[country_code].get_value(sid, dt, field)
 
     def get_last_traded_dt(self, asset, dt):
